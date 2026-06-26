@@ -31,7 +31,7 @@ run_app.py                    # 推荐启动入口
 DASHSCOPE_API_KEY=你的阿里云百炼 API Key
 ```
 
-当前训练配置先通过环境变量或脚本默认值控制，前端选择器后续再接：
+Gradio 页面已提供基础选择器：训练阶段、难度等级、客户音色。下面这些环境变量作为默认选中值：
 
 ```text
 TRAINING_STAGE_ID=cold_call

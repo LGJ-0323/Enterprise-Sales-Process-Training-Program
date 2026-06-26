@@ -7,7 +7,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 import gradio as gr
 import uvicorn
 from fastapi import FastAPI, Request
-from starlette.responses import HTMLResponse
+from starlette.responses import HTMLResponse, RedirectResponse
 
 try:
     from .fastrtc_test import LAST_STATUS, stream
@@ -24,6 +24,11 @@ app = gr.mount_gradio_app(app, stream.ui, path="/ui")
 
 @app.get("/")
 async def index():
+    return RedirectResponse(url="/ui")
+
+
+@app.get("/custom")
+async def custom_index():
     html_content = (BASE_DIR / "index.html").read_text(encoding="utf-8")
     return HTMLResponse(content=html_content)
 

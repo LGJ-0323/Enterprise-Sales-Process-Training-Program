@@ -27,6 +27,7 @@ if not shutil.which("ffmpeg") and os.path.exists(os.path.join(FFMPEG_BIN, "ffmpe
     os.environ["PATH"] = FFMPEG_BIN + os.pathsep + os.environ.get("PATH", "")
 
 import dashscope
+import gradio as gr
 import numpy as np
 from dashscope import Generation
 from dashscope.audio.asr import Recognition
@@ -36,9 +37,21 @@ from fastrtc.pause_detection.silero import SileroVadOptions
 from fastrtc.reply_on_pause import AlgoOptions
 
 try:
-    from .training_config import build_training_prompt, resolve_voice
+    from .training_config import (
+        build_training_prompt,
+        difficulty_choices,
+        resolve_voice,
+        stage_choices,
+        voice_choices,
+    )
 except ImportError:
-    from training_config import build_training_prompt, resolve_voice
+    from training_config import (
+        build_training_prompt,
+        difficulty_choices,
+        resolve_voice,
+        stage_choices,
+        voice_choices,
+    )
 
 
 dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
@@ -81,8 +94,17 @@ def load_customer_profile() -> str:
         return "你是一个中文语音模拟客户。请用自然、简洁的中文回答，每次回复 1 到 3 句话。"
 
 
-def response(audio: tuple[int, np.ndarray]):
+def response(
+    audio: tuple[int, np.ndarray],
+    stage_id: str = DEFAULT_STAGE_ID,
+    difficulty_id: str = DEFAULT_DIFFICULTY_ID,
+    voice_id: str = DEFAULT_VOICE_ID,
+):
     try:
+        selected_stage_id = stage_id or DEFAULT_STAGE_ID
+        selected_difficulty_id = difficulty_id or DEFAULT_DIFFICULTY_ID
+        selected_voice_id = voice_id or DEFAULT_VOICE_ID
+
         set_status("received_audio", prompt="", response_text="", audio_bytes=0)
         audio_data = audio_to_bytes(audio)
 
@@ -122,11 +144,20 @@ def response(audio: tuple[int, np.ndarray]):
             return
 
         training_prompt, training_summary = build_training_prompt(
-            DEFAULT_STAGE_ID,
+            selected_stage_id,
             DEFAULT_CUSTOMER_ID,
-            DEFAULT_DIFFICULTY_ID,
+            selected_difficulty_id,
         )
-        set_status("training_loaded", prompt=prompt, training=training_summary)
+        voice_config = resolve_voice(selected_voice_id)
+        set_status(
+            "training_loaded",
+            prompt=prompt,
+            training={
+                **training_summary,
+                "voice_id": selected_voice_id,
+                "voice": voice_config.get("label", selected_voice_id),
+            },
+        )
 
         qwen_response = Generation.call(
             model=os.getenv("DASHSCOPE_LLM_MODEL", "qwen-turbo"),
@@ -145,7 +176,6 @@ def response(audio: tuple[int, np.ndarray]):
 
         set_status("qwen_done", response_text=response_text)
 
-        voice_config = resolve_voice(DEFAULT_VOICE_ID)
         synthesizer = SpeechSynthesizer(
             model=voice_config.get("model") or os.getenv("DASHSCOPE_TTS_MODEL", "cosyvoice-v1"),
             voice=voice_config.get("voice") or os.getenv("DASHSCOPE_TTS_VOICE", "longxiaochun"),
@@ -184,4 +214,29 @@ stream = Stream(
         ),
     ),
     concurrency_limit=5,
+    additional_inputs=[
+        gr.Dropdown(
+            choices=stage_choices(),
+            value=DEFAULT_STAGE_ID,
+            label="训练阶段",
+            interactive=True,
+        ),
+        gr.Dropdown(
+            choices=difficulty_choices(),
+            value=DEFAULT_DIFFICULTY_ID,
+            label="难度等级",
+            interactive=True,
+        ),
+        gr.Dropdown(
+            choices=voice_choices(),
+            value=DEFAULT_VOICE_ID,
+            label="客户音色",
+            interactive=True,
+        ),
+    ],
+    ui_args={
+        "title": "国际物流模拟客户陪练",
+        "subtitle": "阶段 / 难度 / 音色",
+        "full_screen": False,
+    },
 )
