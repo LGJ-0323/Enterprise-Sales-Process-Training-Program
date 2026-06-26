@@ -1,0 +1,6 @@
+id: easy
+label: 简单
+level: 1
+policy: 没有固定卡点，客户主要配合基础沟通，用于新员工熟悉流程。
+blockers: []
+success_condition: 员工能完成基本开场、需求确认或下一步邀约即可推进。

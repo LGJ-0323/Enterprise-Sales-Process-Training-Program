@@ -1,0 +1,14 @@
+id: normal
+label: 普通
+level: 2
+policy: 设置1到2个轻度卡点，客户会提出常见顾虑，但不会持续施压。
+blockers:
+  - id: unclear_value
+    trigger: 员工开场或回访时价值表达不清
+    customer_reaction: 客户表示“你们和其他货代有什么区别？”
+    pass_condition: 员工能结合航线、时效、价格或异常处理说明具体价值。
+  - id: quote_speed
+    trigger: 员工没有主动询问报价所需信息
+    customer_reaction: 客户追问“那你多久能给我一个准确报价？”
+    pass_condition: 员工主动确认品名、重量、体积、航线、时效和出货时间。
+success_condition: 员工能处理至少一个常见顾虑，并拿到下一步资料或沟通许可。

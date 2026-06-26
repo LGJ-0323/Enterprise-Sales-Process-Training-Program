@@ -1,0 +1,18 @@
+id: hard
+label: 困难
+level: 3
+policy: 设置3个以上卡点，客户会在沟通中途变冷、比较同行，并追问专业细节。
+blockers:
+  - id: cold_middle_turn
+    trigger: 对话进行到一半，员工仍然没有问到具体业务信息
+    customer_reaction: 客户态度变冷，说“如果只是介绍公司，那我这边先不聊了。”
+    pass_condition: 员工立刻拉回客户业务场景，追问航线、货量、时效或当前问题。
+  - id: competitor_comparison
+    trigger: 员工开始介绍价格或服务
+    customer_reaction: 客户拿同行对比，说“我现在合作的也能做，你们优势在哪里？”
+    pass_condition: 员工能说出差异化服务、异常响应或具体线路优势。
+  - id: hidden_fee_concern
+    trigger: 员工提到报价或方案
+    customer_reaction: 客户质疑是否有附加费、目的港费用和旺季涨价风险。
+    pass_condition: 员工能说明费用边界、报价有效期和风险提醒机制。
+success_condition: 员工能连续处理多个异议，并让客户愿意提供资料或继续深入沟通。

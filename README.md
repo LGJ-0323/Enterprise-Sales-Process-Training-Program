@@ -12,11 +12,11 @@ core/
   prompts/
     customer_profile.md       # 默认模拟客户身份背景
   training/
-    stages/                   # 后续放四个销售训练阶段配置
-    customers/                # 后续放客户画像配置
-    difficulties/             # 后续放难度配置
-    rubrics/                  # 后续放评分规则
-    voices/                   # 后续放音色配置
+    stages/                   # 四个销售训练阶段配置
+    customers/                # 客户画像和语气态度配置
+    difficulties/             # 难度和卡点配置
+    rubrics/                  # 评分规则示例
+    voices/                   # 男性中年音色配置
 log/                          # 本地运行日志，GitHub 只保留目录
 run_app.py                    # 推荐启动入口
 ```
@@ -29,6 +29,15 @@ run_app.py                    # 推荐启动入口
 
 ```text
 DASHSCOPE_API_KEY=你的阿里云百炼 API Key
+```
+
+当前训练配置先通过环境变量或脚本默认值控制，前端选择器后续再接：
+
+```text
+TRAINING_STAGE_ID=cold_call
+TRAINING_CUSTOMER_ID=auto
+TRAINING_DIFFICULTY_ID=easy
+TRAINING_VOICE_ID=longsanshu_v3
 ```
 
 ## 启动

@@ -5,6 +5,17 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = BASE_DIR.parent
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+if load_dotenv:
+    load_dotenv(PROJECT_DIR / ".env")
+
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
@@ -24,11 +35,19 @@ from fastrtc import ReplyOnPause, Stream, audio_to_bytes
 from fastrtc.pause_detection.silero import SileroVadOptions
 from fastrtc.reply_on_pause import AlgoOptions
 
+try:
+    from .training_config import build_training_prompt, resolve_voice
+except ImportError:
+    from training_config import build_training_prompt, resolve_voice
+
 
 dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
 
-BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_PROFILE_PATH = BASE_DIR / "prompts" / "customer_profile.md"
+DEFAULT_STAGE_ID = os.getenv("TRAINING_STAGE_ID", "cold_call")
+DEFAULT_CUSTOMER_ID = os.getenv("TRAINING_CUSTOMER_ID", "auto")
+DEFAULT_DIFFICULTY_ID = os.getenv("TRAINING_DIFFICULTY_ID", "easy")
+DEFAULT_VOICE_ID = os.getenv("TRAINING_VOICE_ID", "longsanshu_v3")
 
 LAST_STATUS = {
     "time": None,
@@ -37,6 +56,7 @@ LAST_STATUS = {
     "response_text": "",
     "audio_bytes": 0,
     "error": "",
+    "training": {},
 }
 
 
@@ -101,10 +121,17 @@ def response(audio: tuple[int, np.ndarray]):
             set_status("asr_error", error=asr_response.message)
             return
 
+        training_prompt, training_summary = build_training_prompt(
+            DEFAULT_STAGE_ID,
+            DEFAULT_CUSTOMER_ID,
+            DEFAULT_DIFFICULTY_ID,
+        )
+        set_status("training_loaded", prompt=prompt, training=training_summary)
+
         qwen_response = Generation.call(
             model=os.getenv("DASHSCOPE_LLM_MODEL", "qwen-turbo"),
             messages=[
-                {"role": "system", "content": load_customer_profile()},
+                {"role": "system", "content": f"{load_customer_profile()}\n\n{training_prompt}"},
                 {"role": "user", "content": prompt},
             ],
             result_format="message",
@@ -118,9 +145,10 @@ def response(audio: tuple[int, np.ndarray]):
 
         set_status("qwen_done", response_text=response_text)
 
+        voice_config = resolve_voice(DEFAULT_VOICE_ID)
         synthesizer = SpeechSynthesizer(
-            model=os.getenv("DASHSCOPE_TTS_MODEL", "cosyvoice-v1"),
-            voice=os.getenv("DASHSCOPE_TTS_VOICE", "longxiaochun"),
+            model=voice_config.get("model") or os.getenv("DASHSCOPE_TTS_MODEL", "cosyvoice-v1"),
+            voice=voice_config.get("voice") or os.getenv("DASHSCOPE_TTS_VOICE", "longxiaochun"),
             format=AudioFormat.PCM_24000HZ_MONO_16BIT,
         )
         audio_bytes = synthesizer.call(response_text)

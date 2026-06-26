@@ -1,0 +1,17 @@
+id: male_middle_age
+label: 中年男声音色
+voices:
+  - id: longsanshu_v3
+    label: 龙三叔 - 沉稳中年男声
+    model: cosyvoice-v3-flash
+    voice: longsanshu_v3
+    gender: male
+    age_range: 25-45
+    style: 沉稳、成熟、有客户方负责人质感
+  - id: longfei_v3
+    label: 龙飞 - 磁性中年男声
+    model: cosyvoice-v3-flash
+    voice: longfei_v3
+    gender: male
+    age_range: 30-35
+    style: 有压迫感、适合强势客户或管理层

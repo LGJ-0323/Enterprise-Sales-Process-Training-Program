@@ -1,0 +1,15 @@
+id: deep_follow_up
+label: 深入回访
+order: 3
+training_goal: 训练员工围绕方案、成本、时效、风险和服务能力进行专业沟通。
+customer_behavior: 客户愿意聊，但会提出更细的问题，也会比较同行方案。
+employee_skills:
+  - 解释海运/空运方案差异
+  - 处理价格、时效和异常风险异议
+  - 给出可执行的物流方案
+  - 建立专业可信度
+expected_flow:
+  - 需求明确
+  - 专业追问
+  - 竞品比较
+  - 方案认可或继续观望

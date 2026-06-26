@@ -1,0 +1,15 @@
+id: follow_up
+label: 回访阶段评分示例
+dimensions:
+  - name: 背景承接
+    score: 20
+    criteria: 是否清楚复述上次沟通背景，避免让客户重新解释。
+  - name: 需求挖掘
+    score: 30
+    criteria: 是否问到航线、货量、品名、时效、出货时间和当前供应商痛点。
+  - name: 异议处理
+    score: 30
+    criteria: 是否能处理价格、时效、费用透明度和异常响应顾虑。
+  - name: 下一步推进
+    score: 20
+    criteria: 是否拿到报价资料、下次沟通时间或明确行动。

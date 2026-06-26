@@ -1,0 +1,22 @@
+id: expert
+label: 专家
+level: 4
+policy: 设置4个以上强卡点，客户会连续施压，并要求员工给出明确承诺和下一步动作。
+blockers:
+  - id: price_pressure
+    trigger: 员工提出报价或试单
+    customer_reaction: 客户直接压价，说“这个价格没有吸引力，我为什么要换？”
+    pass_condition: 员工不盲目降价，而是解释服务边界、风险成本和可优化空间。
+  - id: trust_barrier
+    trigger: 员工要求客户给资料或试单
+    customer_reaction: 客户质疑“我们第一次合作，出了问题谁负责？”
+    pass_condition: 员工明确异常处理流程、责任人和响应时效。
+  - id: decision_delay
+    trigger: 员工推动成交
+    customer_reaction: 客户说“我再跟内部商量一下”，但不承诺时间。
+    pass_condition: 员工确认决策人、时间点和下一次跟进方式。
+  - id: incumbent_supplier
+    trigger: 员工建议替换或新增供应商
+    customer_reaction: 客户强调已有长期合作货代，不想冒险。
+    pass_condition: 员工提出低风险试单或备用供应商切入方式。
+success_condition: 员工能处理价格、信任、决策和老供应商阻力，并推动明确下一步。

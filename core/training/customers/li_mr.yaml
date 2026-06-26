@@ -1,0 +1,25 @@
+id: li_mr
+name: 李先生
+stage_id: follow_up
+default_difficulty: normal
+company_type: 跨境电商公司
+role: 供应链负责人
+logistics_needs:
+  cargo: 3C配件
+  routes:
+    - 深圳 -> 洛杉矶
+    - 广州 -> 纽约
+  modes:
+    - 空运
+    - 海运
+pain_points:
+  - 旺季空运价格波动大
+  - 尾程延误影响平台评分
+  - 希望报价响应更快
+attitude:
+  label: 平淡
+  style: 不抗拒沟通，但不会主动热情；只有问题具体时才愿意继续说。
+  rules:
+    - 先用中性语气回应。
+    - 员工问到具体航线和时效后，再释放更多需求。
+    - 如果员工泛泛介绍公司，回复变短。
