@@ -25,7 +25,7 @@ from fastrtc.pause_detection.silero import SileroVadOptions
 from fastrtc.reply_on_pause import AlgoOptions
 
 
-dashscope.api_key = os.getenv("DASHSCOPE_API_KEY", "YOUR_DASHSCOPE_API_KEY")
+dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_PROFILE_PATH = BASE_DIR / "prompts" / "customer_profile.md"
