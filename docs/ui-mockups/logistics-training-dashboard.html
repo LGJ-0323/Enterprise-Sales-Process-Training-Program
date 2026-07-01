@@ -1,0 +1,919 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>国际物流模拟客户陪练 - 最终界面示例</title>
+  <style>
+    :root {
+      --bg: #eef3f8;
+      --panel: #ffffff;
+      --ink: #10243f;
+      --muted: #64748b;
+      --line: #d9e2ee;
+      --teal: #13b8a6;
+      --teal-soft: #d8faf5;
+      --blue: #2563eb;
+      --blue-soft: #e5edff;
+      --amber: #f59e0b;
+      --amber-soft: #fff5d6;
+      --red: #ef4444;
+      --red-soft: #ffe5e5;
+      --green: #22c55e;
+      --green-soft: #defbe6;
+      --shadow: 0 18px 48px rgba(18, 38, 63, 0.13);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 12% 12%, rgba(19, 184, 166, 0.16), transparent 32%),
+        radial-gradient(circle at 88% 8%, rgba(37, 99, 235, 0.14), transparent 34%),
+        linear-gradient(135deg, #f8fbff 0%, var(--bg) 100%);
+      color: var(--ink);
+      font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+      letter-spacing: 0;
+    }
+
+    .stage {
+      width: 1440px;
+      height: 900px;
+      margin: 0 auto;
+      padding: 34px 42px 22px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+
+    .brand {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+    }
+
+    .brand-mark {
+      width: 48px;
+      height: 48px;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--teal), var(--blue));
+      color: #fff;
+      font-size: 25px;
+      font-weight: 800;
+      box-shadow: 0 14px 28px rgba(19, 184, 166, 0.28);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 30px;
+      line-height: 1.2;
+      font-weight: 850;
+      color: #061938;
+    }
+
+    .subtitle {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      height: 32px;
+      padding: 0 12px;
+      border-radius: 999px;
+      background: #fff;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 5px rgba(34, 197, 94, 0.16);
+    }
+
+    .button {
+      height: 38px;
+      padding: 0 16px;
+      border-radius: 8px;
+      border: 0;
+      background: #10243f;
+      color: #fff;
+      font-size: 14px;
+      font-weight: 760;
+      box-shadow: 0 10px 20px rgba(16, 36, 63, 0.18);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 318px 1fr 346px;
+      gap: 18px;
+    }
+
+    .panel {
+      background: rgba(255, 255, 255, 0.88);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel-header {
+      min-height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 18px 12px;
+      border-bottom: 1px solid #edf2f7;
+    }
+
+    .panel-title {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-size: 16px;
+      font-weight: 820;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      height: 26px;
+      padding: 0 9px;
+      border-radius: 7px;
+      background: var(--teal-soft);
+      color: #078b7f;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .section {
+      padding: 14px 18px;
+      border-bottom: 1px solid #edf2f7;
+    }
+
+    .section:last-child {
+      border-bottom: 0;
+    }
+
+    .label {
+      display: block;
+      margin-bottom: 8px;
+      color: #34506f;
+      font-size: 13px;
+      font-weight: 780;
+    }
+
+    .select-like,
+    .textarea-like,
+    .input-like {
+      width: 100%;
+      border: 1px solid #dce5f0;
+      background: #fff;
+      border-radius: 8px;
+      color: var(--ink);
+      box-shadow: 0 8px 20px rgba(18, 38, 63, 0.05);
+    }
+
+    .select-like,
+    .input-like {
+      height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 12px;
+      font-size: 14px;
+    }
+
+    .textarea-like {
+      min-height: 84px;
+      padding: 11px 12px;
+      font-size: 13px;
+      line-height: 1.55;
+      color: #405875;
+    }
+
+    .config-grid {
+      display: grid;
+      gap: 11px;
+    }
+
+    .persona {
+      display: grid;
+      grid-template-columns: 86px 1fr;
+      gap: 14px;
+      align-items: center;
+      padding: 12px;
+      border: 1px solid #dce5f0;
+      border-radius: 10px;
+      background: linear-gradient(180deg, #fff, #f8fbff);
+    }
+
+    .avatar {
+      position: relative;
+      width: 78px;
+      height: 78px;
+      border-radius: 50%;
+      background: #ecfeff;
+      overflow: hidden;
+      border: 1px solid #bdeee8;
+    }
+
+    .avatar::before {
+      content: "";
+      position: absolute;
+      left: 20px;
+      top: 16px;
+      width: 42px;
+      height: 34px;
+      border-radius: 20px 20px 14px 14px;
+      background: #111827;
+    }
+
+    .avatar::after {
+      content: "";
+      position: absolute;
+      left: 18px;
+      bottom: 10px;
+      width: 46px;
+      height: 44px;
+      border-radius: 18px 18px 12px 12px;
+      background: linear-gradient(140deg, #0f766e, #14b8a6);
+      box-shadow: inset 18px 0 0 rgba(255, 255, 255, 0.14);
+    }
+
+    .face {
+      position: absolute;
+      left: 25px;
+      top: 33px;
+      width: 32px;
+      height: 32px;
+      z-index: 2;
+      border-radius: 11px 11px 16px 16px;
+      background: #ffc7a8;
+    }
+
+    .face::before,
+    .face::after {
+      content: "";
+      position: absolute;
+      top: 14px;
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: #334155;
+    }
+
+    .face::before {
+      left: 8px;
+    }
+
+    .face::after {
+      right: 8px;
+    }
+
+    .persona-name {
+      font-size: 20px;
+      font-weight: 880;
+      margin-bottom: 3px;
+    }
+
+    .persona-role {
+      color: #078b7f;
+      font-size: 14px;
+      font-weight: 820;
+      line-height: 1.35;
+    }
+
+    .persona-desc {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .chip {
+      height: 26px;
+      display: inline-flex;
+      align-items: center;
+      padding: 0 8px;
+      border-radius: 7px;
+      background: #f1f5f9;
+      color: #475569;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .center {
+      display: grid;
+      grid-template-rows: 360px 346px;
+      gap: 16px;
+    }
+
+    .voice-room {
+      position: relative;
+      min-height: 360px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.92), rgba(246,250,255,0.92)),
+        repeating-linear-gradient(90deg, transparent 0 36px, rgba(19,184,166,0.04) 36px 37px);
+    }
+
+    .call-state {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: #078b7f;
+      font-size: 13px;
+      font-weight: 820;
+    }
+
+    .voice-main {
+      height: 252px;
+      display: grid;
+      grid-template-columns: 1fr 148px 1fr;
+      align-items: center;
+      padding: 8px 42px 18px;
+    }
+
+    .speaker {
+      display: grid;
+      justify-items: center;
+      gap: 8px;
+    }
+
+    .speaker-card {
+      width: 160px;
+      height: 160px;
+      position: relative;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: #fff;
+      border: 1px solid #dce5f0;
+      box-shadow: 0 18px 36px rgba(18, 38, 63, 0.12);
+    }
+
+    .speaker-card.ai {
+      background: linear-gradient(135deg, #ecfeff, #eef6ff);
+    }
+
+    .speaker-card.client {
+      background: linear-gradient(135deg, #fff7ed, #fff);
+    }
+
+    .headset {
+      width: 70px;
+      height: 70px;
+      border-radius: 22px;
+      background: linear-gradient(135deg, var(--blue), var(--teal));
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-size: 35px;
+      font-weight: 900;
+    }
+
+    .pulse-ring,
+    .pulse-ring::before,
+    .pulse-ring::after {
+      position: absolute;
+      inset: 18px;
+      border-radius: 50%;
+      border: 2px solid rgba(19, 184, 166, 0.24);
+    }
+
+    .pulse-ring::before,
+    .pulse-ring::after {
+      content: "";
+      inset: -14px;
+      opacity: 0.72;
+    }
+
+    .pulse-ring::after {
+      inset: -30px;
+      opacity: 0.38;
+    }
+
+    .speaker-name {
+      font-size: 16px;
+      font-weight: 840;
+    }
+
+    .speaker-note {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .wave {
+      height: 84px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+    }
+
+    .bar {
+      width: 7px;
+      border-radius: 999px;
+      background: linear-gradient(180deg, var(--teal), var(--blue));
+      box-shadow: 0 8px 18px rgba(19, 184, 166, 0.22);
+    }
+
+    .bar:nth-child(1) { height: 22px; }
+    .bar:nth-child(2) { height: 48px; }
+    .bar:nth-child(3) { height: 72px; }
+    .bar:nth-child(4) { height: 36px; }
+    .bar:nth-child(5) { height: 86px; }
+    .bar:nth-child(6) { height: 58px; }
+    .bar:nth-child(7) { height: 30px; }
+    .bar:nth-child(8) { height: 64px; }
+    .bar:nth-child(9) { height: 42px; }
+
+    .call-controls {
+      position: absolute;
+      left: 42px;
+      right: 42px;
+      bottom: 18px;
+      height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+    }
+
+    .round-btn {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      border: 1px solid #dce5f0;
+      background: #fff;
+      color: #223b5b;
+      font-size: 20px;
+      box-shadow: 0 10px 20px rgba(18, 38, 63, 0.1);
+    }
+
+    .round-btn.primary {
+      width: 50px;
+      height: 50px;
+      background: var(--red);
+      border-color: var(--red);
+      color: #fff;
+      font-size: 23px;
+    }
+
+    .conversation {
+      background: rgba(255, 255, 255, 0.91);
+    }
+
+    .dialogue {
+      display: grid;
+      gap: 12px;
+      padding: 16px;
+    }
+
+    .bubble {
+      max-width: 78%;
+      padding: 10px 12px;
+      border-radius: 11px;
+      font-size: 13px;
+      line-height: 1.45;
+      box-shadow: 0 8px 20px rgba(18, 38, 63, 0.06);
+    }
+
+    .bubble.client {
+      justify-self: start;
+      background: #fff7ed;
+      border: 1px solid #fed7aa;
+    }
+
+    .bubble.trainee {
+      justify-self: end;
+      background: #eaf7ff;
+      border: 1px solid #bfdbfe;
+    }
+
+    .bubble.ai {
+      max-width: 92%;
+      background: #f0fdfa;
+      border: 1px solid #99f6e4;
+    }
+
+    .speaker-line {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 5px;
+      color: #506a89;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .right-stack {
+      display: grid;
+      grid-template-rows: 214px 238px 238px;
+      gap: 16px;
+    }
+
+    .score-card {
+      padding: 16px 18px;
+    }
+
+    .score-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      margin-bottom: 14px;
+    }
+
+    .score {
+      font-size: 50px;
+      line-height: 1;
+      font-weight: 900;
+      color: #0f766e;
+    }
+
+    .score-sub {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .metric {
+      margin-top: 12px;
+    }
+
+    .metric-head {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 6px;
+      color: #405875;
+      font-size: 12px;
+      font-weight: 760;
+    }
+
+    .track {
+      height: 8px;
+      border-radius: 999px;
+      background: #e8eef6;
+      overflow: hidden;
+    }
+
+    .fill {
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--teal), var(--blue));
+    }
+
+    .feedback-list {
+      padding: 16px 18px 18px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .feedback {
+      display: grid;
+      grid-template-columns: 30px 1fr;
+      gap: 10px;
+      padding: 10px;
+      border-radius: 9px;
+      background: #f8fbff;
+      border: 1px solid #e2e8f0;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .feedback-icon {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      font-weight: 900;
+    }
+
+    .good {
+      background: var(--green-soft);
+      color: #15803d;
+    }
+
+    .warn {
+      background: var(--amber-soft);
+      color: #b45309;
+    }
+
+    .bad {
+      background: var(--red-soft);
+      color: #dc2626;
+    }
+
+    .history {
+      padding: 14px 18px 18px;
+    }
+
+    .history-item {
+      display: grid;
+      grid-template-columns: 50px 1fr 44px;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 1px solid #edf2f7;
+    }
+
+    .history-item:last-child {
+      border-bottom: 0;
+    }
+
+    .time {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+    }
+
+    .history-title {
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .history-desc {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .mini-score {
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border-radius: 7px;
+      background: var(--blue-soft);
+      color: var(--blue);
+      font-size: 13px;
+      font-weight: 850;
+    }
+
+    .footer-note {
+      margin-top: 12px;
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      color: #8ca0bb;
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .kbd {
+      color: #405875;
+      background: #fff;
+      border: 1px solid #dce5f0;
+      border-radius: 6px;
+      padding: 3px 7px;
+    }
+  </style>
+</head>
+<body>
+  <main class="stage">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">训</div>
+        <div>
+          <h1>国际物流模拟客户陪练控制台</h1>
+          <div class="subtitle">阶段 / 难度 / 客户音色 / 实时语音 / 智能复盘，一站式训练闭环</div>
+        </div>
+      </div>
+      <div class="top-actions">
+        <div class="pill"><span class="dot"></span> FastRTC 实时连接中</div>
+        <div class="pill">本轮 06:42</div>
+        <button class="button">导出复盘报告</button>
+      </div>
+    </header>
+
+    <section class="layout">
+      <aside class="panel">
+        <div class="panel-header">
+          <div class="panel-title">训练配置</div>
+          <span class="tag">可实时切换</span>
+        </div>
+        <div class="section">
+          <div class="config-grid">
+            <div>
+              <span class="label">训练阶段</span>
+              <div class="select-like">陌call：首次触达 <span>⌄</span></div>
+            </div>
+            <div>
+              <span class="label">难度等级</span>
+              <div class="select-like">进阶：多轮异议处理 <span>⌄</span></div>
+            </div>
+            <div>
+              <span class="label">客户音色</span>
+              <div class="select-like">龙三叔 - 沉稳中年男声 <span>⌄</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="section">
+          <span class="label">本轮客户画像</span>
+          <div class="persona">
+            <div class="avatar"><div class="face"></div></div>
+            <div>
+              <div class="persona-name">王女士</div>
+              <div class="persona-role">外贸主管 / 冷淡谨慎 / 价格敏感</div>
+              <div class="persona-desc">主营小家电出口，关注航线稳定、赔付条款和报价透明度。</div>
+            </div>
+          </div>
+          <div class="chips">
+            <span class="chip">拒绝寒暄</span>
+            <span class="chip">追问时效</span>
+            <span class="chip">比较同行报价</span>
+            <span class="chip">需要案例背书</span>
+          </div>
+        </div>
+        <div class="section">
+          <span class="label">陪练目标</span>
+          <div class="textarea-like">在 8 分钟内完成有效开场、挖掘近期出货需求，并争取客户同意添加微信或发送报价方案。</div>
+        </div>
+      </aside>
+
+      <div class="center">
+        <section class="panel voice-room">
+          <div class="panel-header">
+            <div class="panel-title">实时语音陪练</div>
+            <div class="call-state"><span class="dot"></span>客户正在发言，VAD 已检测到语音</div>
+          </div>
+          <div class="voice-main">
+            <div class="speaker">
+              <div class="speaker-card ai">
+                <div class="pulse-ring"></div>
+                <div class="headset">AI</div>
+              </div>
+              <div class="speaker-name">模拟客户</div>
+              <div class="speaker-note">龙三叔音色 · 情绪冷淡</div>
+            </div>
+            <div class="wave" aria-hidden="true">
+              <span class="bar"></span>
+              <span class="bar"></span>
+              <span class="bar"></span>
+              <span class="bar"></span>
+              <span class="bar"></span>
+              <span class="bar"></span>
+              <span class="bar"></span>
+              <span class="bar"></span>
+              <span class="bar"></span>
+            </div>
+            <div class="speaker">
+              <div class="speaker-card client">
+                <div class="headset">我</div>
+              </div>
+              <div class="speaker-name">销售学员</div>
+              <div class="speaker-note">麦克风正常 · 可随时插话</div>
+            </div>
+          </div>
+          <div class="call-controls">
+            <div class="round-btn">🎙</div>
+            <div class="round-btn">↺</div>
+            <div class="round-btn primary">✕</div>
+            <div class="round-btn">💬</div>
+            <div class="round-btn">⚙</div>
+          </div>
+        </section>
+
+        <section class="panel conversation">
+          <div class="panel-header">
+            <div class="panel-title">实时转写与话术辅助</div>
+            <span class="tag">边练边提示</span>
+          </div>
+          <div class="dialogue">
+            <div class="bubble client">
+              <div class="speaker-line"><span>客户转写</span><span>刚刚</span></div>
+              我们现在有固定货代了，价格也还可以。你们如果只是介绍公司，我这边可能暂时没有时间。
+            </div>
+            <div class="bubble trainee">
+              <div class="speaker-line"><span>学员回复</span><span>12 秒前</span></div>
+              理解，王女士。我不耽误您太久，想先确认下近期是否有美线或欧洲线的小家电出货？
+            </div>
+            <div class="bubble ai">
+              <div class="speaker-line"><span>AI 实时建议</span><span>命中异议：已有供应商</span></div>
+              建议先承认现状，再用“备选方案”和“旺季舱位风险”切入。可补一句：我们不替代现有供应商，先给您多一个异常时效的备选报价。
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <aside class="right-stack">
+        <section class="panel score-card">
+          <div class="score-row">
+            <div>
+              <div class="score">82</div>
+              <div class="score-sub">本轮综合得分 / 100</div>
+            </div>
+            <span class="tag">高于团队均值 9%</span>
+          </div>
+          <div class="metric">
+            <div class="metric-head"><span>开场清晰度</span><span>88%</span></div>
+            <div class="track"><div class="fill" style="width: 88%"></div></div>
+          </div>
+          <div class="metric">
+            <div class="metric-head"><span>需求挖掘</span><span>76%</span></div>
+            <div class="track"><div class="fill" style="width: 76%"></div></div>
+          </div>
+          <div class="metric">
+            <div class="metric-head"><span>异议处理</span><span>69%</span></div>
+            <div class="track"><div class="fill" style="width: 69%"></div></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div class="panel-title">AI 教练反馈</div>
+            <span class="tag">实时生成</span>
+          </div>
+          <div class="feedback-list">
+            <div class="feedback">
+              <div class="feedback-icon good">✓</div>
+              <div><strong>做得好：</strong>先认可客户已有货代，没有直接否定对方选择，降低了防御感。</div>
+            </div>
+            <div class="feedback">
+              <div class="feedback-icon warn">!</div>
+              <div><strong>可加强：</strong>需求问题还偏泛，建议追问“近两周是否有急单或补货计划”。</div>
+            </div>
+            <div class="feedback">
+              <div class="feedback-icon bad">×</div>
+              <div><strong>风险点：</strong>尚未给出差异化价值，容易被客户归类为普通报价推销。</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div class="panel-title">训练复盘记录</div>
+            <span class="tag">自动沉淀</span>
+          </div>
+          <div class="history">
+            <div class="history-item">
+              <div class="time">今天</div>
+              <div>
+                <div class="history-title">陌call · 进阶异议</div>
+                <div class="history-desc">客户拒绝推销，成功推进至发送方案</div>
+              </div>
+              <div class="mini-score">82</div>
+            </div>
+            <div class="history-item">
+              <div class="time">昨天</div>
+              <div>
+                <div class="history-title">报价跟进 · 中等</div>
+                <div class="history-desc">价格解释充分，成交推进不足</div>
+              </div>
+              <div class="mini-score">74</div>
+            </div>
+            <div class="history-item">
+              <div class="time">周五</div>
+              <div>
+                <div class="history-title">老客户唤醒 · 简单</div>
+                <div class="history-desc">开场自然，案例引用准确</div>
+              </div>
+              <div class="mini-score">91</div>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </section>
+
+    <div class="footer-note">
+      <span class="kbd">Gradio + FastRTC</span>
+      <span class="kbd">实时 ASR</span>
+      <span class="kbd">客户画像 Prompt</span>
+      <span class="kbd">TTS 音色切换</span>
+      <span class="kbd">训练评分与复盘</span>
+    </div>
+  </main>
+</body>
+</html>

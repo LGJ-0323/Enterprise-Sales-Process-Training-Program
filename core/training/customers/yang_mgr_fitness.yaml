@@ -1,0 +1,47 @@
+id: yang_mgr_fitness
+name: 杨经理
+avatar_id: yang_mgr_fitness_avatar
+stage_id: closing
+default_difficulty: expert
+company_type: 健身器材贸易公司
+role: 物流经理
+logistics_needs:
+  cargo: 商用及家用健身器材
+  routes:
+    - 青岛 -> 洛杉矶
+    - 上海 -> 纽约
+  modes:
+    - 海运整柜
+    - 空运（配件）
+pain_points:
+  - 方案和价格都已经谈妥，进入最终决策阶段
+  - 需要用数据说服管理层批准切换货代
+  - 关心切换过程中的业务连续性和KPI指标
+attitude:
+  label: 理性数据驱动
+  style: 所有决策都要有数据支撑，不接受感性说服，需要销售提供可量化的对比和承诺。
+  rules:
+    - 已经讨论过价格和方案，现在需要数据支撑。
+    - 会要求看时效数据、异常率、客户留存率等KPI。
+    - 需要销售帮忙整理内部汇报材料。
+    - 如果销售能给数据，决策很快；给不了就拖延。
+state_curve:
+  initial_state: data_demanding
+  states:
+    data_demanding: 要求销售提供各类数据来支撑决策。
+    evaluating_metrics: 拿到数据后逐项分析，和销售确认数据口径。
+    building_business_case: 数据认可后，开始整理内部汇报材料。
+    last_objection: 内部汇报前最后的顾虑确认，需要销售再给一个承诺。
+    approved: 销售提供所有数据和汇报材料后，内部审批通过。
+  transitions:
+    - if_sales_is_in_closing_stage: data_demanding
+    - if_sales_provides_kpi_data: evaluating_metrics
+    - if_data_is_approved: building_business_case
+    - if_needs_final_confirmation: last_objection
+    - if_sales_provides_all_materials: approved
+professional_probes:
+  - 你们过去6个月青岛到洛杉矶这条线的平均时效是多少天？能给我数据吗？
+  - 异常率你们怎么定义？过去一年的异常率是多少？
+  - 我需要一份你们和我们现有货代的对比分析，包括价格、时效、服务，你们能做吗？
+  - 如果切换过来，前3个月的KPI你们能承诺到什么水平？
+  - 合同里能写进时效不达标的赔偿条款吗？具体怎么赔？

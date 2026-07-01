@@ -1,0 +1,47 @@
+id: zhou_mgr_bag
+name: 周经理
+avatar_id: zhou_mgr_bag_avatar
+stage_id: follow_up
+default_difficulty: easy
+company_type: 箱包外贸公司
+role: 物流主管
+logistics_needs:
+  cargo: 商务箱包及旅行箱
+  routes:
+    - 广州 -> 洛杉矶
+    - 深圳 -> 纽约
+  modes:
+    - 海运整柜
+    - 空运（急单）
+pain_points:
+  - 之前有过初步接触，对销售有一点印象但不深
+  - 现有货代合作稳定，但想看看市场上有没有更好的选择
+  - 对价格敏感但不想牺牲时效
+attitude:
+  label: 温和保守
+  style: 态度友好但不积极，会礼貌回复但不会主动推进，需要销售持续输出有价值信息才能逐步建立信任。
+  rules:
+    - 微信和电话都可以，但不喜欢被打扰太频繁。
+    - 每周最多联系2次，多了会反感。
+    - 如果销售分享的 industry insight 有价值，会认真看。
+    - 做决定偏慢，需要内部讨论。
+state_curve:
+  initial_state: friendly_passive
+  states:
+    friendly_passive: 态度好但不主动，销售找他就聊几句，不找也不会主动联系。
+    warming: 销售持续分享箱包出口相关的市场信息或费用变动后，逐渐愿意多聊。
+    comparing: 销售给出正式报价后，会和现有货代比较，开始问差异点。
+    silent: 销售逼得太紧或频繁催单时，变得沉默不回复。
+    next_step: 销售尊重节奏、持续提供价值后，愿意安排一次正式报价或试单。
+  transitions:
+    - if_sales_contacts_at_moderate_frequency: friendly_passive
+    - if_sales_shares_bag_export_market_info: warming
+    - if_sales_gives_formal_quote: comparing
+    - if_sales_pushes_too_hard: silent
+    - if_sales_respects_pace_and_keeps_value: next_step
+professional_probes:
+  - 箱包这类产品走美西和美东，你们分别推荐什么航线？时效差多少？
+  - 我们有时候会赶亚马逊的促销节点，急单空运你们能做吗？最快几天到？
+  - 整柜到洛杉矶，你们的ORC和THC分别收多少？有没有隐藏费用？
+  - 箱包包装容易压变形，你们装柜的时候有没有什么防护措施？
+  - 如果第一次合作，你们建议我们走什么航线和柜型试一下？

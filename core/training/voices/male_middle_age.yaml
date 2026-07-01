@@ -1,5 +1,5 @@
 id: male_middle_age
-label: 中年男声音色
+label: 客户音色
 voices:
   - id: longsanshu_v3
     label: 龙三叔 - 沉稳中年男声
@@ -15,3 +15,59 @@ voices:
     gender: male
     age_range: 30-35
     style: 有压迫感、适合强势客户或管理层
+  - id: longshuo_v3
+    label: 龙硕 - 干练男声
+    model: cosyvoice-v3-flash
+    voice: longshuo_v3
+    gender: male
+    age_range: 25-35
+    style: 干练、清晰、适合物流经理或供应链负责人
+  - id: longshu_v3
+    label: 龙书 - 稳重男声
+    model: cosyvoice-v3-flash
+    voice: longshu_v3
+    gender: male
+    age_range: 25-35
+    style: 稳重、平和、适合平淡型客户
+  - id: longxiaocheng_v2
+    label: 龙小诚 - 低音男声
+    model: cosyvoice-v2
+    voice: longxiaocheng_v2
+    gender: male
+    age_range: 30-45
+    style: 低沉、克制、适合强势或谨慎客户
+  - id: longtian_v2
+    label: 龙天 - 理智男声
+    model: cosyvoice-v2
+    voice: longtian_v2
+    gender: male
+    age_range: 30-45
+    style: 理性、稳健、适合专业追问型客户
+  - id: longxiaochun_v2
+    label: 龙小淳 - 知性女声
+    model: cosyvoice-v2
+    voice: longxiaochun_v2
+    gender: female
+    age_range: 25-40
+    style: 知性、积极、适合愿意沟通的客户
+  - id: longxiaoxia_v2
+    label: 龙小夏 - 权威女声
+    model: cosyvoice-v2
+    voice: longxiaoxia_v2
+    gender: female
+    age_range: 30-45
+    style: 沉稳、权威、适合强势管理层客户
+  - id: longwan_v2
+    label: 龙婉 - 知性女声
+    model: cosyvoice-v2
+    voice: longwan_v2
+    gender: female
+    age_range: 25-40
+    style: 温和、知性、适合平淡或谨慎客户
+  - id: longxiaobai_v2
+    label: 龙小白 - 亲和女声
+    model: cosyvoice-v2
+    voice: longxiaobai_v2
+    gender: female
+    age_range: 25-35
+    style: 亲和、明亮、适合初级训练或友好客户

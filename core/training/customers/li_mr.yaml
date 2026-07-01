@@ -1,5 +1,6 @@
 id: li_mr
 name: 李先生
+avatar_id: li_mr_avatar
 stage_id: follow_up
 default_difficulty: normal
 company_type: 跨境电商公司
@@ -23,3 +24,22 @@ attitude:
     - 先用中性语气回应。
     - 员工问到具体航线和时效后，再释放更多需求。
     - 如果员工泛泛介绍公司，回复变短。
+state_curve:
+  initial_state: neutral
+  states:
+    neutral: 不排斥沟通，但不会主动热情，只给中性回应。
+    engaged: 销售问到航线、货量、时效或平台要求后，愿意释放更多信息。
+    worried: 销售提到价格或时效时，担心旺季波动和尾程延误。
+    impatient: 销售重复介绍公司、不问具体资料时，回复变短。
+    open_next_step: 销售能明确报价资料和响应时间时，愿意给货量或报价信息。
+  transitions:
+    - if_sales_generic: impatient
+    - if_sales_asks_route_volume_timing: engaged
+    - if_sales_mentions_price_or_delivery: worried
+    - if_sales_lists_quote_requirements_and_timeline: open_next_step
+professional_probes:
+  - 你们空运价格有效期一般能锁几天？
+  - 尾程如果延误，怎么反馈节点？会不会影响平台评分？
+  - 深圳到洛杉矶这条线，泡重和实重怎么计费？
+  - 如果走海外仓或 FBA，预约和派送谁负责跟？
+  - 要给准确报价，你们需要我提供哪些尺寸、重量和出货时间？

@@ -44,6 +44,21 @@ def load_voices() -> dict[str, dict[str, Any]]:
     return voices
 
 
+@lru_cache
+def load_avatars() -> dict[str, dict[str, Any]]:
+    avatars: dict[str, dict[str, Any]] = {}
+    for path in sorted((TRAINING_DIR / "avatars").glob("*.yaml")):
+        data = _read_yaml(path)
+        entries = data.get("avatars", [data])
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            avatar_id = str(entry.get("id") or path.stem)
+            entry["id"] = avatar_id
+            avatars[avatar_id] = entry
+    return avatars
+
+
 def load_stages() -> dict[str, dict[str, Any]]:
     return _load_items("stages")
 
@@ -91,6 +106,10 @@ def voice_choices() -> list[tuple[str, str]]:
     return [(_label(voice), voice["id"]) for voice in load_voices().values()]
 
 
+def avatar_choices() -> list[tuple[str, str]]:
+    return [(_label(avatar), avatar["id"]) for avatar in load_avatars().values()]
+
+
 def _select_customer(customer_id: str | None, stage_id: str) -> dict[str, Any]:
     customers = load_customers()
     if customer_id and customer_id != "auto" and customer_id in customers:
@@ -116,8 +135,108 @@ def resolve_voice(voice_id: str | None) -> dict[str, Any]:
     return _get_or_first(load_voices(), voice_id)
 
 
+def resolve_avatar(avatar_id: str | None) -> dict[str, Any]:
+    return _get_or_first(load_avatars(), avatar_id)
+
+
+def resolve_avatar_for_customer(customer_id: str | None, avatar_id: str | None = None) -> dict[str, Any]:
+    avatars = load_avatars()
+    customers = load_customers()
+
+    if avatar_id and avatar_id != "auto" and avatar_id in avatars:
+        avatar = avatars[avatar_id]
+        if not customer_id or avatar.get("customer_id") == customer_id:
+            return avatar
+
+    if customer_id:
+        customer = customers.get(customer_id, {})
+        customer_avatar_id = customer.get("avatar_id")
+        if customer_avatar_id in avatars:
+            return avatars[customer_avatar_id]
+
+        for avatar in avatars.values():
+            if avatar.get("customer_id") == customer_id:
+                return avatar
+
+    return _get_or_first(avatars, None if avatar_id == "auto" else avatar_id)
+
+
 def _dump(data: dict[str, Any]) -> str:
     return yaml.safe_dump(data, allow_unicode=True, sort_keys=False).strip()
+
+
+@lru_cache(maxsize=16)
+def _build_training_prompt_v2_cached(
+    stage_id: str,
+    difficulty_id: str,
+) -> str:
+    """缓存版：只返回 prompt 字符串，按 (stage_id, difficulty_id) 缓存。
+
+    首次调用时加载 JSONL + 组装 few-shot prompt（~500ms），
+    后续调用直接返回缓存结果（<1ms）。
+    """
+    stage, customer, difficulty = resolve_training(stage_id, None, difficulty_id)
+    stage_label = _label(stage)
+
+    # 尝试从 JSONL 加载
+    try:
+        from .case_loader import find_case
+        from .prompt_assembler import assemble_prompt
+    except ImportError:
+        try:
+            from case_loader import find_case
+            from prompt_assembler import assemble_prompt
+        except ImportError:
+            find_case = None
+            assemble_prompt = None
+
+    if find_case and assemble_prompt:
+        case = find_case(
+            training_type=stage_label,
+            difficulty=_label(difficulty),
+        )
+        if case:
+            return assemble_prompt(
+                case,
+                current_state="guarded",
+                history=[],
+                difficulty=_label(difficulty),
+            )
+
+    # Fallback: 使用原有 YAML 方式
+    prompt, _ = build_training_prompt(stage_id, None, difficulty_id)
+    return prompt
+
+
+def build_training_prompt_v2(
+    stage_id: str | None,
+    customer_id: str | None,
+    difficulty_id: str | None,
+    history: list[dict[str, Any]] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """V2 版本：优先从 roleplay_cases.jsonl 加载案例，fallback 到 YAML。
+
+    通过 @lru_cache 缓存，首次调用后不再重复加载 JSONL/组装 prompt。
+    延迟: 首次 ~500ms，后续 <1ms。
+    """
+    stage, customer, difficulty = resolve_training(stage_id, customer_id, difficulty_id)
+
+    # 使用缓存获取 prompt
+    prompt = _build_training_prompt_v2_cached(
+        stage["id"], difficulty["id"],
+    )
+
+    # 构建 summary（轻量，不做缓存）
+    summary = {
+        "stage_id": stage["id"],
+        "stage": _label(stage),
+        "customer_id": customer["id"],
+        "customer": customer.get("name", customer["id"]),
+        "difficulty_id": difficulty["id"],
+        "difficulty": _label(difficulty),
+    }
+
+    return prompt, summary
 
 
 def build_training_prompt(
@@ -127,6 +246,8 @@ def build_training_prompt(
 ) -> tuple[str, dict[str, Any]]:
     stage, customer, difficulty = resolve_training(stage_id, customer_id, difficulty_id)
     attitude = customer.get("attitude", {})
+    state_curve = customer.get("state_curve", {})
+    professional_probes = customer.get("professional_probes", [])
     blockers = difficulty.get("blockers", [])
 
     summary = {
@@ -134,6 +255,7 @@ def build_training_prompt(
         "stage": _label(stage),
         "customer_id": customer["id"],
         "customer": customer.get("name", customer["id"]),
+        "avatar_id": customer.get("avatar_id", ""),
         "attitude": attitude.get("label", ""),
         "difficulty_id": difficulty["id"],
         "difficulty": _label(difficulty),
@@ -143,8 +265,21 @@ def build_training_prompt(
     prompt = "\n\n".join(
         [
             "【系统定位】\n"
-            "你是一个智能模拟客户陪练系统，服务于公司内部国际物流销售训练。"
-            "你只扮演客户，不扮演销售教练，不解释系统规则，不跳出角色。",
+            "你正在扮演真实企业客户，服务于公司内部国际物流销售训练。"
+            "对话中的员工/用户是雄达物流销售，正在争取让客户使用雄达物流的国际物流服务。"
+            "你只扮演被拜访企业里的客户人员，不扮演雄达物流销售，不替雄达物流推销服务，"
+            "不扮演销售教练，不解释系统规则，不跳出角色。",
+            "【角色边界】\n"
+            "- 员工/用户身份：雄达物流销售。\n"
+            "- 你的身份：企业客户方人员，代表自己的企业评估物流供应商。\n"
+            "- 你的沟通目标：根据本企业发货需求、成本、时效、风险和信任顾虑，判断是否继续了解雄达物流。\n"
+            "- 你不能说成自己是雄达物流的人，也不能主动向员工推销物流服务。\n"
+            "- 你说“我们”时，只能指你的企业、工厂、贸易公司、平台或现有合作货代。",
+            "【反向错误示例】\n"
+            "- 错误：你好，我们是雄达物流，想了解一下你们最近有没有发货需求？\n"
+            "- 错误：我们这边雄达物流价格比较低，可以给你们报价。\n"
+            "- 正确：嗯，你们是做哪条线的？我现在有合作货代，你先说重点。\n"
+            "- 正确：价格低我会关注，但你们费用边界和旺季涨价怎么保证？",
             "【行业范围】\n"
             "国际物流业务，包括海运、空运、询价、报价、订舱、舱位、时效、目的港费用、报关、查验、异常处理、旺季风险和售后跟进。",
             "【当前训练阶段】\n"
@@ -168,6 +303,20 @@ def build_training_prompt(
                     "默认难度": customer.get("default_difficulty"),
                 }
             ),
+            "【客户状态曲线】\n"
+            + _dump(
+                {
+                    "初始状态": state_curve.get("initial_state"),
+                    "可选状态": state_curve.get("states", {}),
+                    "状态转移线索": state_curve.get("transitions", []),
+                }
+            ),
+            "【客户专业问题库】\n"
+            + _dump(
+                {
+                    "可选专业追问": professional_probes,
+                }
+            ),
             "【客户语气态度】\n"
             + _dump(
                 {
@@ -185,8 +334,23 @@ def build_training_prompt(
                     "本轮固定卡点": blockers,
                 }
             ),
+            "【本轮客户状态判定】\n"
+            "- 回复前先结合员工当前发言、客户状态曲线、当前阶段、难度卡点和最近 10 轮会话记忆，判断客户此刻状态。\n"
+            "- 你只能在状态曲线中选择最贴近的状态；如果没有明显线索，使用初始状态。\n"
+            "- 员工越具体地问到航线、货量、品名、时效、费用、当前供应商问题，客户越可能从防备/平淡转向好奇或愿意继续。\n"
+            "- 员工泛泛介绍公司、说太长、只讲低价或回避专业问题，客户要降温、质疑或施压。\n"
+            "- 员工提出报价、方案、试单或服务承诺时，客户应进入追问风险、费用边界、责任边界的状态。\n"
+            "- 不要输出状态名，只输出该状态下客户会自然说的话。",
+            "【专业问题使用规则】\n"
+            "- 每轮最多选择 1 个与当前员工发言最相关的专业问题，不能把问题库连续罗列出来。\n"
+            "- 专业问题必须贴合客户画像中的公司类型、岗位、货物、航线、运输方式和痛点。\n"
+            "- 如果员工没有触及具体业务，先用短句降温或要求说重点，不急着抛复杂专业问题。\n"
+            "- 如果员工给出具体方案或承诺，优先追问费用构成、报价有效期、时效、异常处理、责任人或旺季保障。\n"
+            "- 如果员工回答专业、具体、可执行，可以少量释放客户需求信息，但不要一次性把全部背景说完。",
             "【回复规则】\n"
             "- 每次回复控制在 1 到 3 句话，适合语音播放。\n"
+            "- 直接输出客户会说的话，不要添加姓名、角色或说话人前缀；禁止使用“王女士：”“客户：”“外贸主管：”这类格式。\n"
+            "- 用户消息中的“我们”通常指雄达物流销售团队，不是你；你回复里的“我们”只能指客户自己的企业。\n"
             "- 你要像真实客户一样表达需求、犹豫、比较、反问或拒绝。\n"
             "- 如果当前难度有卡点，你要在对话中自然制造这些卡点，但不要说出“卡点”二字。\n"
             "- 如果员工表现专业、具体、有推进动作，你可以逐步放松态度并透露更多信息。\n"

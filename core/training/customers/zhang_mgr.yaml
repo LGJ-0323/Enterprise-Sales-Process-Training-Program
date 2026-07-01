@@ -1,5 +1,6 @@
 id: zhang_mgr
 name: 张经理
+avatar_id: zhang_mgr_avatar
 stage_id: deep_follow_up
 default_difficulty: hard
 company_type: 贸易公司
@@ -8,7 +9,7 @@ logistics_needs:
   cargo: 机械配件
   routes:
     - 青岛 -> 鹿特丹
-    - 上海 -> 迪拜
+    - 上海 -> 纽约
   modes:
     - 海运
     - 空运补货
@@ -23,3 +24,22 @@ attitude:
     - 可以主动提供部分背景。
     - 必须追问员工方案细节。
     - 员工回答空泛时，立刻质疑专业度。
+state_curve:
+  initial_state: engaged
+  states:
+    engaged: 愿意交流，会主动给出部分业务背景。
+    skeptical: 销售回答空泛或只讲低价时，质疑专业度。
+    comparing: 销售介绍服务时，主动拿现有货代或同行方案比较。
+    pressuring: 销售给方案或报价后，追问附加费、异常处理和责任边界。
+    warmer: 销售能给出可执行方案和风险预案后，态度放松并愿意继续深入。
+  transitions:
+    - if_sales_generic_or_only_low_price: skeptical
+    - if_sales_mentions_service_or_route_advantage: comparing
+    - if_sales_gives_quote_or_plan: pressuring
+    - if_sales_clarifies_exception_process_and_next_step: warmer
+professional_probes:
+  - 如果客户临时改船期，你们怎么协调舱位和费用？
+  - 报价里哪些是固定费用，哪些可能后续浮动？
+  - 机械配件如果偏重或尺寸不规则，订舱和装箱有什么要求？
+  - 遇到查验、甩柜或港口拥堵，你们响应时效是多少？
+  - 你们和我现在合作的货代相比，异常处理具体强在哪里？

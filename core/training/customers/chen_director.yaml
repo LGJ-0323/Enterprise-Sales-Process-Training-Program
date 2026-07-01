@@ -1,5 +1,6 @@
 id: chen_director
 name: 陈总
+avatar_id: chen_director_avatar
 stage_id: closing
 default_difficulty: expert
 company_type: 中型制造企业
@@ -22,3 +23,22 @@ attitude:
     - 不轻易承诺成交。
     - 对价格和服务承诺连续施压。
     - 只有员工能明确下一步动作时才松口。
+state_curve:
+  initial_state: cautious
+  states:
+    cautious: 谨慎、强势，不轻易相信新供应商。
+    price_pressure: 销售提价格或试单时，持续压价并要求说明价值。
+    risk_pressure: 销售承诺服务或旺季保障时，追问责任边界和异常兜底。
+    decision_delay: 销售推动成交但缺少明确方案时，用内部商量拖延。
+    trial_open: 销售提出低风险试单、责任人和时间表后，愿意考虑下一步。
+  transitions:
+    - if_sales_mentions_price_or_trial_order: price_pressure
+    - if_sales_promises_service_or_peak_season_space: risk_pressure
+    - if_sales_pushes_close_without_plan: decision_delay
+    - if_sales_proposes_low_risk_trial_with_owner_and_timeline: trial_open
+professional_probes:
+  - 第一次合作如果旺季掉链子，责任人和兜底方案是谁？
+  - 你们价格低，是低在哪里？会不会牺牲时效或服务？
+  - 海运整柜如果临时没舱位，你们有什么替代方案？
+  - 试单可以，但异常响应时效和赔付边界怎么写清楚？
+  - 如果要替换长期货代，你们能先从哪条线低风险切入？

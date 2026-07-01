@@ -1,0 +1,79 @@
+id: avatars
+label: 客户人物形象
+avatars:
+  - id: wang_ms_avatar
+    label: 王女士 - 冷淡外贸主管
+    customer_id: wang_ms
+    initials: 王
+    role: 外贸主管
+    temperament: 冷淡、谨慎、时间敏感
+    visual_style: 深青色商务头像，表情克制，适合陌call阶段。
+    accent: "#0f766e"
+    background: "linear-gradient(135deg, #0f766e 0%, #22c55e 100%)"
+    cartoon:
+      skin: "#f1c6a8"
+      hair: "#111827"
+      jacket: "#0f766e"
+      shirt: "#ecfeff"
+      cheek: "#e87979"
+      expression: guarded
+      hair_style: bob
+      accessory: none
+      motion: subtle
+  - id: li_mr_avatar
+    label: 李先生 - 平淡供应链负责人
+    customer_id: li_mr
+    initials: 李
+    role: 供应链负责人
+    temperament: 平淡、务实、关注效率
+    visual_style: 深蓝色商务头像，态度中性，适合回访阶段。
+    accent: "#2563eb"
+    background: "linear-gradient(135deg, #1d4ed8 0%, #06b6d4 100%)"
+    cartoon:
+      skin: "#d7a47f"
+      hair: "#1f2937"
+      jacket: "#1d4ed8"
+      shirt: "#f8fafc"
+      cheek: "#d9907a"
+      expression: neutral
+      hair_style: side_part
+      accessory: glasses
+      motion: calm
+  - id: zhang_mgr_avatar
+    label: 张经理 - 热情挑剔物流经理
+    customer_id: zhang_mgr
+    initials: 张
+    role: 物流经理
+    temperament: 热情、挑剔、专业追问
+    visual_style: 紫红色商务头像，表达积极但要求细节，适合深入回访。
+    accent: "#be123c"
+    background: "linear-gradient(135deg, #be123c 0%, #f97316 100%)"
+    cartoon:
+      skin: "#efbf95"
+      hair: "#3f1f1f"
+      jacket: "#be123c"
+      shirt: "#fff7ed"
+      cheek: "#f97316"
+      expression: sharp
+      hair_style: neat
+      accessory: headset
+      motion: lively
+  - id: chen_director_avatar
+    label: 陈总 - 强势谨慎总经理
+    customer_id: chen_director
+    initials: 陈
+    role: 总经理
+    temperament: 强势、谨慎、重视承诺
+    visual_style: 深灰金色商务头像，压迫感较强，适合逼单阶段。
+    accent: "#92400e"
+    background: "linear-gradient(135deg, #334155 0%, #b45309 100%)"
+    cartoon:
+      skin: "#c58b63"
+      hair: "#0f172a"
+      jacket: "#374151"
+      shirt: "#fffbeb"
+      cheek: "#b45309"
+      expression: stern
+      hair_style: short
+      accessory: glasses
+      motion: firm

@@ -1,0 +1,47 @@
+id: huang_boss_autoparts
+name: 黄总
+avatar_id: huang_boss_autoparts_avatar
+stage_id: follow_up
+default_difficulty: normal
+company_type: 汽配工厂
+role: 工厂老板
+logistics_needs:
+  cargo: 汽车制动系统配件
+  routes:
+    - 宁波 -> 底特律
+    - 上海 -> 芝加哥
+  modes:
+    - 海运整柜
+    - 海运拼箱
+pain_points:
+  - 之前加过微信但没有深入合作过
+  - 对现有货代基本满意但想多留一个备选
+  - 关注报价竞争力和异常处理能力
+attitude:
+  label: 观望试探
+  style: 愿意回微信但节奏慢，不会主动找你，你找他时回复不快但会认真看内容。
+  rules:
+    - 微信沟通为主，不接电话。
+    - 回复消息通常在晚上或周末。
+    - 如果发来的资料有针对性，会回复几句。
+    - 如果发的是通用广告，已读不回。
+state_curve:
+  initial_state: watchful
+  states:
+    watchful: 不拒绝沟通，但不主动推进，看销售能拿出什么实质内容。
+    interested: 销售发来针对汽配品类的方案或美东航线分析后，产生兴趣。
+    questioning: 销售约电话沟通或见面时，开始追问合作模式和费用细节。
+    fading: 销售频繁群发问候但没有实质内容时，逐渐冷淡。
+    trial_ready: 销售给出试单方案和明确时间节点后，愿意尝试一小票。
+  transitions:
+    - if_sales_sends_generic_material: watchful
+    - if_sales_sends_auto_parts_specific_plan: interested
+    - if_sales_requests_call_or_meeting: questioning
+    - if_sales_spams_greetings_without_value: fading
+    - if_sales_proposes_trial_order_with_timeline: trial_ready
+professional_probes:
+  - 汽配配件出口美国有没有什么特殊认证要求？你们熟悉DOT标准吗？
+  - 宁波到底特律这条线，你们走过吗？船期和时效怎么样？
+  - 我这边一个月大概3-4个柜，有时候会夹杂一些拼箱，你们拼箱服务怎么收费？
+  - 如果货物到港后发现破损，你们怎么界定责任和赔付？
+  - 我想先走一票试试看，你们最小接受多大的货量？

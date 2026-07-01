@@ -1,6 +1,19 @@
+"""
+fastrtc_test.py — ASR + LLM(P0 v2) + TTS 实时语音管道
+
+职责：
+  · response(): WebRTC 音频 → ASR → build_training_prompt_v2 → 千问 → TTS → 音频流
+  · stream: FastRTC Stream 对象（供 app_new_web 挂载）
+
+延迟优化：
+  · build_training_prompt_v2 已通过 lru_cache 缓存，首次调用后不再重复加载 JSONL
+  · system prompt 只在首次调用时组装，后续调用直接复用
+"""
+
 import os
 import shutil
 import tempfile
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -36,9 +49,10 @@ from fastrtc import ReplyOnPause, Stream, audio_to_bytes
 from fastrtc.pause_detection.silero import SileroVadOptions
 from fastrtc.reply_on_pause import AlgoOptions
 
+# ── 训练配置 ──
 try:
     from .training_config import (
-        build_training_prompt,
+        build_training_prompt_v2,
         difficulty_choices,
         resolve_voice,
         stage_choices,
@@ -46,7 +60,7 @@ try:
     )
 except ImportError:
     from training_config import (
-        build_training_prompt,
+        build_training_prompt_v2,
         difficulty_choices,
         resolve_voice,
         stage_choices,
@@ -62,6 +76,7 @@ DEFAULT_CUSTOMER_ID = os.getenv("TRAINING_CUSTOMER_ID", "auto")
 DEFAULT_DIFFICULTY_ID = os.getenv("TRAINING_DIFFICULTY_ID", "easy")
 DEFAULT_VOICE_ID = os.getenv("TRAINING_VOICE_ID", "longsanshu_v3")
 
+# ── 全局状态 ──
 LAST_STATUS = {
     "time": None,
     "stage": "idle",
@@ -94,24 +109,71 @@ def load_customer_profile() -> str:
         return "你是一个中文语音模拟客户。请用自然、简洁的中文回答，每次回复 1 到 3 句话。"
 
 
+def _normalize_response_args(audio_or_data, args):
+    audio = getattr(audio_or_data, "audio", None) or audio_or_data
+    stage_id = DEFAULT_STAGE_ID
+    difficulty_id = DEFAULT_DIFFICULTY_ID
+    voice_id = DEFAULT_VOICE_ID
+
+    if len(args) >= 3:
+        stage_id, difficulty_id, voice_id = args[-3:]
+    elif len(args) == 2:
+        stage_id, difficulty_id = args
+    elif len(args) == 1:
+        stage_id = args[0]
+
+    return (
+        audio,
+        stage_id or DEFAULT_STAGE_ID,
+        difficulty_id or DEFAULT_DIFFICULTY_ID,
+        voice_id or DEFAULT_VOICE_ID,
+    )
+
+
 def response(
     audio: tuple[int, np.ndarray],
-    stage_id: str = DEFAULT_STAGE_ID,
-    difficulty_id: str = DEFAULT_DIFFICULTY_ID,
-    voice_id: str = DEFAULT_VOICE_ID,
+    *args,
 ):
-    try:
-        selected_stage_id = stage_id or DEFAULT_STAGE_ID
-        selected_difficulty_id = difficulty_id or DEFAULT_DIFFICULTY_ID
-        selected_voice_id = voice_id or DEFAULT_VOICE_ID
+    """FastRTC ReplyOnPause handler: ASR → LLM(v2) → TTS → yield audio
 
-        set_status("received_audio", prompt="", response_text="", audio_bytes=0)
+    FastRTC 可能传 4 或 5 个参数 (audio, [webrtc_id,] stage, difficulty, voice)。
+    *args 吞掉多余的 webrtc_id。
+
+    延迟: ASR(~500ms) + LLM(~1-3s) + TTS(~500ms)
+    build_training_prompt_v2 已缓存，仅首次调用时加载 JSONL
+    """
+    try:
+        # 从 args 中提取 stage/difficulty/voice（取最后 3 个）
+        overall_start = time.perf_counter()
+        audio, selected_stage_id, selected_difficulty_id, selected_voice_id = _normalize_response_args(audio, args)
+
+        try:
+            audio_duration_s = round(float(np.asarray(audio[1]).shape[-1]) / float(audio[0]), 2)
+        except Exception:
+            audio_duration_s = None
+        set_status(
+            "received_audio",
+            prompt="",
+            response_text="",
+            audio_bytes=0,
+            training={
+                "stage_id": selected_stage_id,
+                "difficulty_id": selected_difficulty_id,
+                "voice_id": selected_voice_id,
+            },
+            audio_duration_s=audio_duration_s,
+        )
+
+        # 1. Audio → bytes
         audio_data = audio_to_bytes(audio)
 
+        # 2. Save to temp file
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as audio_file:
             audio_file.write(audio_data)
             audio_path = audio_file.name
 
+        # 3. ASR
+        asr_start = time.perf_counter()
         recognition = Recognition(
             model=os.getenv("DASHSCOPE_ASR_MODEL", "paraformer-realtime-v2"),
             callback=None,
@@ -134,7 +196,6 @@ def response(
                 prompt = sentences.get("text", "").strip()
             else:
                 prompt = ""
-
             set_status("asr_done", prompt=prompt)
             if not prompt:
                 set_status("asr_empty", error="No text recognized from audio.")
@@ -143,7 +204,8 @@ def response(
             set_status("asr_error", error=asr_response.message)
             return
 
-        training_prompt, training_summary = build_training_prompt(
+        # 4. P0 v2: build_training_prompt_v2（lru_cache 已生效）
+        training_prompt, training_summary = build_training_prompt_v2(
             selected_stage_id,
             DEFAULT_CUSTOMER_ID,
             selected_difficulty_id,
@@ -159,6 +221,7 @@ def response(
             },
         )
 
+        # 5. LLM
         qwen_response = Generation.call(
             model=os.getenv("DASHSCOPE_LLM_MODEL", "qwen-turbo"),
             messages=[
@@ -176,6 +239,7 @@ def response(
 
         set_status("qwen_done", response_text=response_text)
 
+        # 6. TTS
         synthesizer = SpeechSynthesizer(
             model=voice_config.get("model") or os.getenv("DASHSCOPE_TTS_MODEL", "cosyvoice-v1"),
             voice=voice_config.get("voice") or os.getenv("DASHSCOPE_TTS_VOICE", "longxiaochun"),
@@ -189,12 +253,14 @@ def response(
         set_status("tts_done", audio_bytes=len(audio_bytes))
         audio_array = np.frombuffer(audio_bytes, dtype=np.int16).reshape(1, -1)
         yield (24000, audio_array)
+
     except Exception as exc:
         set_status("exception", error=f"{type(exc).__name__}: {exc}")
         traceback.print_exc()
         return
 
 
+# ── FastRTC Stream ────────────────────────────────────
 stream = Stream(
     modality="audio",
     mode="send-receive",
