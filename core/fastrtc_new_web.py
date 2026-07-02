@@ -15,11 +15,13 @@ P0: build_training_prompt_v2 + lru_cache
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import traceback
 import wave
@@ -47,7 +49,7 @@ import dashscope
 import gradio as gr
 import numpy as np
 from dashscope import Generation
-from dashscope.audio.asr import Recognition
+from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionResult
 from dashscope.audio.tts_v2 import AudioFormat, SpeechSynthesizer
 from fastrtc import ReplyOnPause, Stream, audio_to_bytes
 from fastrtc.pause_detection.silero import SileroVadOptions
@@ -93,6 +95,48 @@ DEFAULT_DIFFICULTY_ID = os.getenv("TRAINING_DIFFICULTY_ID", "easy")
 DEFAULT_VOICE_ID = os.getenv("TRAINING_VOICE_ID", "longsanshu_v3")
 DEFAULT_AVATAR_ID = os.getenv("TRAINING_AVATAR_ID", "auto")
 
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+ASR_SAMPLE_RATE = _env_int("WEBRTC_ASR_SAMPLE_RATE", 16000)
+ASR_FORMAT = os.getenv("WEBRTC_ASR_FORMAT", "pcm").strip().lower()
+ASR_TRAILING_SILENCE_MS = _env_int("WEBRTC_ASR_TRAILING_SILENCE_MS", 900)
+ASR_MAX_SENTENCE_SILENCE_MS = _env_int("WEBRTC_ASR_MAX_SENTENCE_SILENCE_MS", 800)
+ASR_SEMANTIC_PUNCTUATION_ENABLED = _env_bool("WEBRTC_ASR_SEMANTIC_PUNCTUATION_ENABLED", False)
+ASR_MULTI_THRESHOLD_MODE_ENABLED = _env_bool("WEBRTC_ASR_MULTI_THRESHOLD_MODE_ENABLED", True)
+ASR_USE_CALLBACK = _env_bool("WEBRTC_ASR_USE_CALLBACK", True)
+ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S = _env_float("WEBRTC_ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S", 6.0)
+ASR_CALLBACK_GRACE_S = _env_float("WEBRTC_ASR_CALLBACK_GRACE_S", 0.9)
+ASR_CALLBACK_FRAME_BYTES = _env_int("WEBRTC_ASR_CALLBACK_FRAME_BYTES", 6400)
+ASR_SYNC_FALLBACK = _env_bool("WEBRTC_ASR_SYNC_FALLBACK", False)
+VAD_AUDIO_CHUNK_DURATION = _env_float("WEBRTC_AUDIO_CHUNK_DURATION", 0.3)
+VAD_STARTED_TALKING_THRESHOLD = _env_float("WEBRTC_STARTED_TALKING_THRESHOLD", 0.08)
+VAD_SPEECH_THRESHOLD = _env_float("WEBRTC_SPEECH_THRESHOLD", 0.05)
+VAD_MAX_CONTINUOUS_SPEECH_S = _env_float("WEBRTC_MAX_CONTINUOUS_SPEECH_S", 8.0)
+VAD_THRESHOLD = _env_float("WEBRTC_VAD_THRESHOLD", 0.42)
+VAD_MIN_SPEECH_DURATION_MS = _env_int("WEBRTC_MIN_SPEECH_DURATION_MS", 120)
+VAD_MIN_SILENCE_DURATION_MS = _env_int("WEBRTC_MIN_SILENCE_DURATION_MS", 1000)
+VAD_SPEECH_PAD_MS = _env_int("WEBRTC_SPEECH_PAD_MS", 300)
+
 STAGE_IDS = set(load_stages())
 DIFFICULTY_IDS = set(load_difficulties())
 VOICE_IDS = set(load_voices())
@@ -101,7 +145,7 @@ AVATAR_IDS = set(load_avatars()) | {"auto"}
 # ── 全局状态 ───────────────────────────────────────────
 LAST_STATUS = {
     "time": None, "stage": "idle", "prompt": "", "response_text": "",
-    "audio_bytes": 0, "error": "", "training": {},
+    "audio_bytes": 0, "error": "", "training": {}, "timings": {},
 }
 
 def set_status(stage: str, **kwargs):
@@ -127,6 +171,58 @@ def strip_spoken_identity(text: str, customer_name: str | None = None) -> str:
     prev = None
     while prev != cleaned: prev = cleaned; cleaned = prefix.sub("", cleaned).strip()
     return cleaned
+
+
+def _extract_json_object_text(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        return cleaned
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start >= 0 and end > start:
+        return cleaned[start:end + 1]
+    return ""
+
+
+def _json_string_value(text: str, key: str) -> str:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)"', text or "", re.DOTALL)
+    if not match:
+        return ""
+    try:
+        return json.loads(f'"{match.group(1)}"')
+    except json.JSONDecodeError:
+        return match.group(1).replace(r"\"", '"').replace(r"\n", "\n")
+
+
+def clean_customer_reply(raw_text: str, customer_name: str | None = None) -> str:
+    """Return only the spoken customer sentence, even if the model outputs JSON."""
+    cleaned = (raw_text or "").strip()
+    if not cleaned:
+        return ""
+
+    json_text = _extract_json_object_text(cleaned)
+    if json_text:
+        try:
+            payload = json.loads(json_text)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            for key in ("customer_reply", "reply", "response_text", "response", "text", "content"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return strip_spoken_identity(value, customer_name)
+        fallback = _json_string_value(json_text, "customer_reply")
+        if fallback:
+            return strip_spoken_identity(fallback, customer_name)
+
+    cleaned = strip_spoken_identity(cleaned, customer_name)
+    json_prefix = _json_string_value(cleaned, "customer_reply")
+    if json_prefix:
+        return strip_spoken_identity(json_prefix, customer_name)
+    return cleaned
+
 
 def is_role_reversed_sales_reply(text: str) -> bool:
     c = re.sub(r"\s+", "", text or "")
@@ -172,6 +268,348 @@ def synthesize_with_retry(response_text: str, voice_config: dict, attempts: int 
     raise RuntimeError(f"TTS failed after {attempts} attempts")
 
 
+def _round_time(start: float) -> float:
+    return round(time.perf_counter() - start, 3)
+
+
+def _audio_duration_s(audio: tuple[int, np.ndarray]) -> float | None:
+    try:
+        samples = np.asarray(audio[1]).shape[-1]
+        return round(float(samples) / float(audio[0]), 3)
+    except Exception:
+        return None
+
+
+def _audio_array_to_int16_mono(audio_array: np.ndarray) -> np.ndarray:
+    arr = np.asarray(audio_array)
+    if arr.ndim > 1:
+        arr = arr.reshape(-1)
+    if arr.dtype == np.int16:
+        return arr.astype(np.int16, copy=False)
+    if np.issubdtype(arr.dtype, np.floating):
+        return (np.clip(arr, -1.0, 1.0) * 32767).astype(np.int16)
+    return arr.astype(np.int16)
+
+
+def _audio_level_metrics(audio: tuple[int, np.ndarray]) -> dict[str, object]:
+    try:
+        pcm = _audio_array_to_int16_mono(audio[1]).astype(np.float32)
+        if pcm.size == 0:
+            return {"audio_peak": 0, "audio_rms": 0.0, "audio_dbfs": None}
+        abs_pcm = np.abs(pcm)
+        peak = int(np.max(abs_pcm))
+        rms = float(np.sqrt(np.mean(np.square(pcm / 32768.0))))
+        dbfs = None if rms <= 0 else float(round(20 * np.log10(max(rms, 1e-9)), 1))
+        return {"audio_peak": peak, "audio_rms": round(rms, 5), "audio_dbfs": dbfs}
+    except Exception as exc:
+        return {"audio_level_error": f"{type(exc).__name__}: {exc}"}
+
+
+def _prepare_webrtc_asr_pcm(audio: tuple[int, np.ndarray]) -> tuple[str, list[str], dict]:
+    """Normalize WebRTC audio to raw 16 kHz mono PCM for low-latency ASR."""
+    temp_paths: list[str] = []
+    metrics: dict[str, object] = {}
+
+    pcm_start = time.perf_counter()
+    source_pcm = _audio_array_to_int16_mono(audio[1])
+    metrics["audio_pcm_bytes_raw"] = int(source_pcm.nbytes)
+    metrics["audio_pcm_prepare_s"] = _round_time(pcm_start)
+
+    with tempfile.NamedTemporaryFile(suffix=".pcm", delete=False) as input_file:
+        input_file.write(source_pcm.tobytes())
+        input_path = input_file.name
+    temp_paths.append(input_path)
+
+    metrics["asr_format"] = "pcm"
+    trailing_samples = max(0, int(ASR_SAMPLE_RATE * ASR_TRAILING_SILENCE_MS / 1000))
+    if not shutil.which("ffmpeg"):
+        if int(audio[0]) == ASR_SAMPLE_RATE:
+            if trailing_samples:
+                with open(input_path, "ab") as input_file:
+                    input_file.write(np.zeros(trailing_samples, dtype=np.int16).tobytes())
+                metrics["audio_trailing_silence_ms"] = ASR_TRAILING_SILENCE_MS
+            metrics["audio_resample_skipped"] = "ffmpeg_not_found_input_rate_matches"
+            metrics["asr_sample_rate"] = ASR_SAMPLE_RATE
+            return input_path, temp_paths, metrics
+        metrics["audio_resample_skipped"] = "ffmpeg_not_found_fallback_to_mp3"
+        return _prepare_webrtc_asr_mp3(audio, metrics, temp_paths)
+
+    with tempfile.NamedTemporaryFile(suffix=".pcm", delete=False) as output_file:
+        output_path = output_file.name
+    temp_paths.append(output_path)
+
+    resample_start = time.perf_counter()
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "s16le",
+                "-ar",
+                str(int(audio[0])),
+                "-ac",
+                "1",
+                "-i",
+                input_path,
+                "-vn",
+                "-f",
+                "s16le",
+                "-ac",
+                "1",
+                "-ar",
+                str(ASR_SAMPLE_RATE),
+                output_path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if trailing_samples:
+            with open(output_path, "ab") as output_file:
+                output_file.write(np.zeros(trailing_samples, dtype=np.int16).tobytes())
+            metrics["audio_trailing_silence_ms"] = ASR_TRAILING_SILENCE_MS
+        metrics["audio_resample_s"] = _round_time(resample_start)
+        metrics["audio_pcm_bytes_16k"] = os.path.getsize(output_path)
+        metrics["asr_sample_rate"] = ASR_SAMPLE_RATE
+        return output_path, temp_paths, metrics
+    except Exception as exc:
+        metrics["audio_resample_s"] = _round_time(resample_start)
+        metrics["audio_resample_error"] = f"{type(exc).__name__}: {exc}"
+        return _prepare_webrtc_asr_mp3(audio, metrics, temp_paths)
+
+
+def _prepare_webrtc_asr_mp3(
+    audio: tuple[int, np.ndarray],
+    metrics: dict | None = None,
+    temp_paths: list[str] | None = None,
+) -> tuple[str, list[str], dict]:
+    """Encode WebRTC audio, then normalize it to 16 kHz mono MP3 for ASR."""
+    temp_paths = temp_paths or []
+    metrics = metrics or {}
+
+    encode_start = time.perf_counter()
+    audio_data = audio_to_bytes(audio)
+    metrics["audio_mp3_bytes_raw"] = len(audio_data)
+    metrics["audio_encode_s"] = _round_time(encode_start)
+
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as input_file:
+        input_file.write(audio_data)
+        input_path = input_file.name
+    temp_paths.append(input_path)
+
+    metrics["asr_format"] = "mp3"
+    trailing_silence_s = max(0.0, ASR_TRAILING_SILENCE_MS / 1000)
+    if not shutil.which("ffmpeg"):
+        metrics["audio_transcode_skipped"] = "ffmpeg_not_found"
+        metrics["asr_sample_rate"] = audio[0]
+        return input_path, temp_paths, metrics
+
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as output_file:
+        output_path = output_file.name
+    temp_paths.append(output_path)
+
+    transcode_start = time.perf_counter()
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                input_path,
+                "-af",
+                f"apad=pad_dur={trailing_silence_s}",
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                str(ASR_SAMPLE_RATE),
+                "-codec:a",
+                "libmp3lame",
+                "-b:a",
+                "64k",
+                output_path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if trailing_silence_s:
+            metrics["audio_trailing_silence_ms"] = ASR_TRAILING_SILENCE_MS
+        metrics["audio_transcode_s"] = _round_time(transcode_start)
+        metrics["audio_mp3_bytes_16k"] = os.path.getsize(output_path)
+        metrics["asr_sample_rate"] = ASR_SAMPLE_RATE
+        return output_path, temp_paths, metrics
+    except Exception as exc:
+        metrics["audio_transcode_s"] = _round_time(transcode_start)
+        metrics["audio_transcode_error"] = f"{type(exc).__name__}: {exc}"
+        metrics["asr_sample_rate"] = audio[0]
+        return input_path, temp_paths, metrics
+
+
+def _prepare_webrtc_asr_audio(audio: tuple[int, np.ndarray]) -> tuple[str, list[str], dict]:
+    if ASR_FORMAT == "mp3":
+        return _prepare_webrtc_asr_mp3(audio)
+    return _prepare_webrtc_asr_pcm(audio)
+
+
+def _cleanup_temp_paths(paths: list[str]) -> None:
+    for path in paths:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _parse_asr_sentences(sentences) -> str:
+    if isinstance(sentences, list):
+        return " ".join(x.get("text", "") for x in sentences).strip()
+    if isinstance(sentences, dict):
+        return sentences.get("text", "").strip()
+    return ""
+
+
+class _FastAsrCallback(RecognitionCallback):
+    def __init__(self):
+        self.first_final_event = threading.Event()
+        self.complete_event = threading.Event()
+        self.error_event = threading.Event()
+        self.lock = threading.Lock()
+        self.sentences: list[dict] = []
+        self.latest_text = ""
+        self.error_message = ""
+        self.first_final_s: float | None = None
+        self.started_at = time.perf_counter()
+
+    def on_event(self, result: RecognitionResult) -> None:
+        sentence = result.get_sentence()
+        if not isinstance(sentence, dict):
+            return
+        text = (sentence.get("text") or "").strip()
+        with self.lock:
+            if text:
+                self.latest_text = text
+            if RecognitionResult.is_sentence_end(sentence):
+                sentence_id = sentence.get("sentence_id")
+                if sentence_id is None or all(s.get("sentence_id") != sentence_id for s in self.sentences):
+                    self.sentences.append(sentence)
+                if self.first_final_s is None:
+                    self.first_final_s = _round_time(self.started_at)
+                self.first_final_event.set()
+
+    def on_complete(self) -> None:
+        self.complete_event.set()
+
+    def on_error(self, result: RecognitionResult) -> None:
+        self.error_message = getattr(result, "message", "") or "ASR callback error"
+        self.error_event.set()
+        self.first_final_event.set()
+
+    def prompt(self) -> str:
+        with self.lock:
+            if self.sentences:
+                ordered = sorted(self.sentences, key=lambda s: s.get("sentence_id") or 0)
+                return _parse_asr_sentences(ordered)
+            return self.latest_text.strip()
+
+
+def _stop_recognition_async(recognition: Recognition) -> None:
+    try:
+        recognition.stop()
+    except Exception:
+        pass
+
+
+def _recognize_audio_sync(
+    audio_path: str,
+    audio_format: str,
+    sample_rate: int,
+    asr_options: dict,
+    timings: dict,
+) -> tuple[str, str]:
+    timings["asr_mode"] = "sync_call"
+    rec = Recognition(
+        model=os.getenv("DASHSCOPE_ASR_MODEL", "paraformer-realtime-v2"),
+        callback=None,
+        format=audio_format,
+        sample_rate=sample_rate,
+    )
+    asr_resp = rec.call(audio_path, **asr_options)
+    if asr_resp.status_code != 200:
+        return "", asr_resp.message
+    return _parse_asr_sentences(asr_resp.get_sentence()), ""
+
+
+def _recognize_audio_callback(
+    audio_path: str,
+    audio_format: str,
+    sample_rate: int,
+    asr_options: dict,
+    timings: dict,
+) -> tuple[str, str]:
+    timings["asr_mode"] = "callback"
+    callback = _FastAsrCallback()
+    rec = Recognition(
+        model=os.getenv("DASHSCOPE_ASR_MODEL", "paraformer-realtime-v2"),
+        callback=callback,
+        format=audio_format,
+        sample_rate=sample_rate,
+    )
+    rec.start(**asr_options)
+    with open(audio_path, "rb") as audio_file:
+        while True:
+            frame = audio_file.read(ASR_CALLBACK_FRAME_BYTES)
+            if not frame:
+                break
+            rec.send_audio_frame(frame)
+
+    threading.Thread(target=_stop_recognition_async, args=(rec,), daemon=True).start()
+    if not callback.first_final_event.wait(ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S):
+        timings["asr_callback_timeout_s"] = ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S
+        prompt = callback.prompt()
+        return prompt, "" if prompt else "ASR callback timeout before first final sentence"
+
+    if callback.error_event.is_set():
+        return "", callback.error_message
+
+    end_at = time.perf_counter() + ASR_CALLBACK_GRACE_S
+    last_prompt = callback.prompt()
+    while time.perf_counter() < end_at and not callback.complete_event.is_set():
+        time.sleep(0.03)
+        prompt = callback.prompt()
+        if prompt != last_prompt:
+            last_prompt = prompt
+            end_at = time.perf_counter() + ASR_CALLBACK_GRACE_S
+
+    timings["asr_callback_first_final_s"] = callback.first_final_s
+    timings["asr_callback_grace_s"] = ASR_CALLBACK_GRACE_S
+    return callback.prompt(), ""
+
+
+def _recognize_audio_fast(
+    audio_path: str,
+    audio_format: str,
+    sample_rate: int,
+    asr_options: dict,
+    timings: dict,
+) -> tuple[str, str]:
+    if not ASR_USE_CALLBACK:
+        return _recognize_audio_sync(audio_path, audio_format, sample_rate, asr_options, timings)
+    try:
+        return _recognize_audio_callback(audio_path, audio_format, sample_rate, asr_options, timings)
+    except Exception as exc:
+        timings["asr_callback_error"] = f"{type(exc).__name__}: {exc}"
+        if ASR_SYNC_FALLBACK:
+            return _recognize_audio_sync(audio_path, audio_format, sample_rate, asr_options, timings)
+        return "", f"{type(exc).__name__}: {exc}"
+
+
 # ═══════════════════════════════════════════════════════
 #   run_customer_turn — 同步 API 版（wechat 兼容）
 # ═══════════════════════════════════════════════════════
@@ -207,7 +645,7 @@ def run_customer_turn(
         messages=[{"role":"system","content":f"{load_customer_profile()}\n\n{training_prompt}\n\n{avatar_prompt}\n\n{mem_prompt}\n\n{guard_prompt}"},
                   {"role":"user","content":prompt}], result_format="message")
     if resp.status_code == 200:
-        raw = resp.output.choices[0].message.content; rt = strip_spoken_identity(raw, training_summary.get("customer"))
+        raw = resp.output.choices[0].message.content; rt = clean_customer_reply(raw, training_summary.get("customer"))
         if not rt: rt = raw.strip() or "嗯，您先说说具体想怎么合作？"
         gr = "role_reversed" if is_role_reversed_sales_reply(rt) else ("hostile" if is_hostile_or_confused_user_text(prompt) else "")
         if gr: rt = build_customer_guardrail_reply(prompt, st)
@@ -235,33 +673,74 @@ def response(audio: tuple[int, np.ndarray], *args):
     *args: FastRTC 传 4 或 5 个参数 (audio, [webrtc_id,] stage, difficulty, voice)
     """
     try:
+        overall_start = time.perf_counter()
+        timings: dict[str, object] = {}
         if len(args) >= 3: stage_id, diff_id, voice_id = args[-3], args[-2], args[-1]
         elif len(args) == 2: stage_id, diff_id, voice_id = args[0], args[1], DEFAULT_VOICE_ID
         elif len(args) == 1: stage_id, diff_id, voice_id = args[0], DEFAULT_DIFFICULTY_ID, DEFAULT_VOICE_ID
         else: stage_id, diff_id, voice_id = DEFAULT_STAGE_ID, DEFAULT_DIFFICULTY_ID, DEFAULT_VOICE_ID
         s, d, v = stage_id or DEFAULT_STAGE_ID, diff_id or DEFAULT_DIFFICULTY_ID, voice_id or DEFAULT_VOICE_ID
 
-        set_status("received_audio", prompt="", response_text="", audio_bytes=0)
+        audio_duration_s = _audio_duration_s(audio)
+        timings.update(_audio_level_metrics(audio))
+        set_status(
+            "received_audio",
+            prompt="",
+            response_text="",
+            audio_bytes=0,
+            audio_duration_s=audio_duration_s,
+            audio_sample_rate=audio[0],
+            training={"stage_id": s, "difficulty_id": d, "voice_id": v},
+            timings=timings,
+        )
 
-        # 1. Save audio
-        audio_data = audio_to_bytes(audio)
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-            f.write(audio_data); audio_path = f.name
+        # 1. Encode and normalize audio for ASR.
+        audio_path, temp_paths, audio_metrics = _prepare_webrtc_asr_audio(audio)
+        timings.update(audio_metrics)
+        set_status(
+            "audio_prepared",
+            prompt="",
+            response_text="",
+            audio_bytes=0,
+            audio_duration_s=audio_duration_s,
+            training={"stage_id": s, "difficulty_id": d, "voice_id": v},
+            timings=timings,
+        )
 
         # 2. ASR
-        rec = Recognition(model=os.getenv("DASHSCOPE_ASR_MODEL","paraformer-realtime-v2"), callback=None, format="mp3", sample_rate=audio[0])
-        try: asr_resp = rec.call(audio_path)
+        asr_start = time.perf_counter()
+        audio_format = str(timings.get("asr_format") or ASR_FORMAT)
+        asr_sample_rate = int(timings.get("asr_sample_rate") or ASR_SAMPLE_RATE)
+        asr_options = {
+            "max_sentence_silence": ASR_MAX_SENTENCE_SILENCE_MS,
+            "semantic_punctuation_enabled": ASR_SEMANTIC_PUNCTUATION_ENABLED,
+            "multi_threshold_mode_enabled": ASR_MULTI_THRESHOLD_MODE_ENABLED,
+        }
+        timings.update(
+            {
+                "asr_max_sentence_silence_ms": ASR_MAX_SENTENCE_SILENCE_MS,
+                "asr_semantic_punctuation_enabled": ASR_SEMANTIC_PUNCTUATION_ENABLED,
+                "asr_multi_threshold_mode_enabled": ASR_MULTI_THRESHOLD_MODE_ENABLED,
+                "asr_use_callback": ASR_USE_CALLBACK,
+            }
+        )
+        try:
+            prompt, asr_error = _recognize_audio_fast(audio_path, audio_format, asr_sample_rate, asr_options, timings)
         finally:
-            try: os.remove(audio_path)
-            except OSError: pass
+            _cleanup_temp_paths(temp_paths)
+        timings["asr_s"] = _round_time(asr_start)
 
-        if asr_resp.status_code != 200: set_status("asr_error", error=asr_resp.message); return
-        sentences = asr_resp.get_sentence()
-        prompt = " ".join(x.get("text","") for x in sentences).strip() if isinstance(sentences,list) else (sentences or {}).get("text","").strip() if isinstance(sentences,dict) else ""
-        if not prompt: set_status("asr_empty"); return
-        set_status("asr_done", prompt=prompt)
+        if asr_error:
+            set_status("asr_error", error=asr_error, timings=timings)
+            return
+        timings["prompt_chars"] = len(prompt)
+        if not prompt:
+            set_status("asr_empty", audio_duration_s=audio_duration_s, timings=timings)
+            return
+        set_status("asr_done", prompt=prompt, audio_duration_s=audio_duration_s, timings=timings)
 
         # 3. LLM (v2 + guardrails)
+        prompt_start = time.perf_counter()
         training_prompt, training_summary = build_training_prompt_v2(s, DEFAULT_CUSTOMER_ID, d)
         voice_cfg = resolve_voice(v)
         st = {**training_summary, "voice_id": v, "voice": voice_cfg.get("label",v)}
@@ -271,27 +750,39 @@ def response(audio: tuple[int, np.ndarray], *args):
         mem, _ = sanitize_recent_memory(raw_mem)
         mem_prompt = f"【会话记忆】\n{mem}" if mem else "【会话记忆】\n暂无历史对话。"
         guard_prompt = build_role_guard_prompt(training_summary.get("customer"))
-        set_status("loaded", prompt=prompt, training=st)
+        timings["prompt_build_s"] = _round_time(prompt_start)
+        set_status("loaded", prompt=prompt, training=st, timings=timings)
 
+        qwen_start = time.perf_counter()
         resp = Generation.call(model=os.getenv("DASHSCOPE_LLM_MODEL","qwen-turbo"),
             messages=[{"role":"system","content":f"{load_customer_profile()}\n\n{training_prompt}\n\n{mem_prompt}\n\n{guard_prompt}"},
                       {"role":"user","content":prompt}], result_format="message")
+        timings["qwen_s"] = _round_time(qwen_start)
 
         if resp.status_code == 200:
             raw = resp.output.choices[0].message.content
-            rt = strip_spoken_identity(raw, training_summary.get("customer"))
+            rt = clean_customer_reply(raw, training_summary.get("customer"))
             if not rt: rt = raw.strip() or "嗯，您先说说具体想怎么合作？"
             if is_role_reversed_sales_reply(rt): rt = build_customer_guardrail_reply(prompt, st)
         else: rt = "抱歉，系统开小差了。"
-        set_status("qwen_done", response_text=rt)
+        timings["response_chars"] = len(rt)
+        set_status("qwen_done", response_text=rt, timings=timings)
 
         # 4. Save turn (SQLite)
-        try: save_turn(session_id=session_key, user_text=prompt, assistant_text=rt, training=st)
-        except Exception: pass
+        save_start = time.perf_counter()
+        try:
+            save_turn(session_id=session_key, user_text=prompt, assistant_text=rt, training=st)
+            timings["save_s"] = _round_time(save_start)
+        except Exception as exc:
+            timings["save_s"] = _round_time(save_start)
+            timings["save_error"] = f"{type(exc).__name__}: {exc}"
 
         # 5. TTS with retry → yield
+        tts_start = time.perf_counter()
         ab = synthesize_with_retry(rt, voice_cfg)
-        set_status("tts_done", audio_bytes=len(ab))
+        timings["tts_s"] = _round_time(tts_start)
+        timings["total_s"] = _round_time(overall_start)
+        set_status("tts_done", audio_bytes=len(ab), timings=timings)
         yield (24000, np.frombuffer(ab, dtype=np.int16).reshape(1, -1))
 
     except Exception as exc:
@@ -305,9 +796,22 @@ def response(audio: tuple[int, np.ndarray], *args):
 
 stream = Stream(
     modality="audio", mode="send-receive",
-    handler=ReplyOnPause(response,
-        algo_options=AlgoOptions(audio_chunk_duration=0.4, started_talking_threshold=0.05, speech_threshold=0.03, max_continuous_speech_s=6),
-        model_options=SileroVadOptions(threshold=0.35, min_speech_duration_ms=120, min_silence_duration_ms=700, speech_pad_ms=250)),
+    handler=ReplyOnPause(
+        response,
+        algo_options=AlgoOptions(
+            audio_chunk_duration=VAD_AUDIO_CHUNK_DURATION,
+            started_talking_threshold=VAD_STARTED_TALKING_THRESHOLD,
+            speech_threshold=VAD_SPEECH_THRESHOLD,
+            max_continuous_speech_s=VAD_MAX_CONTINUOUS_SPEECH_S,
+        ),
+        model_options=SileroVadOptions(
+            threshold=VAD_THRESHOLD,
+            min_speech_duration_ms=VAD_MIN_SPEECH_DURATION_MS,
+            min_silence_duration_ms=VAD_MIN_SILENCE_DURATION_MS,
+            speech_pad_ms=VAD_SPEECH_PAD_MS,
+        ),
+        can_interrupt=False,
+    ),
     concurrency_limit=5,
     additional_inputs=[
         gr.Dropdown(choices=stage_choices(), value=DEFAULT_STAGE_ID, label="训练阶段", interactive=True),

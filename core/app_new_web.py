@@ -177,17 +177,18 @@ function onConfigChange(){stageId=document.getElementById('stageSel').value;diff
 ['stageSel','diffSel','voiceSel'].forEach(id=>document.getElementById(id).addEventListener('change',onConfigChange));
 
 // ── 实时转写轮询 ──
-let lastPrompt='',lastResponse='';
+let lastPrompt='',lastResponse='',lastError='';
 async function pollTranscript(){try{const r=await fetch('/debug/status');const d=await r.json();
 const box=document.getElementById('transcript');let updated=false;
 if(d.prompt&&d.prompt!==lastPrompt){lastPrompt=d.prompt;box.innerHTML+='<div class="t-line t-user">🎤 '+d.prompt.replace(/</g,'&lt;')+'</div>';updated=true}
 if(d.response_text&&d.response_text!==lastResponse){lastResponse=d.response_text;box.innerHTML+='<div class="t-line t-ai">🤖 '+d.response_text.replace(/</g,'&lt;')+'</div>';updated=true}
+if(d.error&&d.error!==lastError){lastError=d.error;box.innerHTML+='<div class="t-line t-system">Error: '+d.error.replace(/</g,'&lt;')+'</div>';updated=true}
 if(d.guardrail)box.innerHTML+='<div class="t-line t-system">⚠ Guardrail: '+d.guardrail+'</div>';
 if(updated)box.scrollTop=box.scrollHeight;
-if(d.training)document.getElementById('sessionInfo').textContent='阶段: '+(d.training.stage||'')+' · 客户: '+(d.training.customer||'')+' · 来源: '+(d.training.source||'?');
+if(d.training){const t=d.timings||{};const timing=(t.total_s?' · 总耗时: '+t.total_s+'s':'')+(t.asr_s?' · ASR: '+t.asr_s+'s':'')+(t.qwen_s?' · LLM: '+t.qwen_s+'s':'')+(t.tts_s?' · TTS: '+t.tts_s+'s':'')+(t.asr_mode?' · 模式: '+t.asr_mode:'')+(t.audio_dbfs?' · 音量: '+t.audio_dbfs+'dB':'');document.getElementById('sessionInfo').textContent='阶段: '+(d.training.stage||'')+' · 客户: '+(d.training.customer||'')+' · 来源: '+(d.training.source||'?')+timing;}
 }catch(e){}}
 
-loadConfig();loadPersona();setInterval(pollTranscript,1500);
+loadConfig();loadPersona();setInterval(pollTranscript,2500);
 </script></body></html>"""
 
 @app.get("/")
