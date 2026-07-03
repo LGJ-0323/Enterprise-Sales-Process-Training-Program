@@ -182,13 +182,16 @@ def _build_training_prompt_v2_cached(
     try:
         from .case_loader import find_case
         from .prompt_assembler import assemble_prompt
+        from .training_data_context import build_model_context_for_case
     except ImportError:
         try:
             from case_loader import find_case
             from prompt_assembler import assemble_prompt
+            from training_data_context import build_model_context_for_case
         except ImportError:
             find_case = None
             assemble_prompt = None
+            build_model_context_for_case = None
 
     if find_case and assemble_prompt:
         case = find_case(
@@ -196,12 +199,17 @@ def _build_training_prompt_v2_cached(
             difficulty=_label(difficulty),
         )
         if case:
-            return assemble_prompt(
+            prompt = assemble_prompt(
                 case,
                 current_state="guarded",
                 history=[],
                 difficulty=_label(difficulty),
             )
+            if build_model_context_for_case:
+                data_context, _ = build_model_context_for_case(case)
+                if data_context:
+                    prompt = f"{prompt}\n\n{data_context}"
+            return prompt
 
     # Fallback: 使用原有 YAML 方式
     prompt, _ = build_training_prompt(stage_id, None, difficulty_id)
@@ -236,6 +244,75 @@ def build_training_prompt_v2(
         "difficulty": _label(difficulty),
     }
 
+    try:
+        from .case_loader import find_case
+        from .training_data_context import build_model_context_for_case
+    except ImportError:
+        try:
+            from case_loader import find_case
+            from training_data_context import build_model_context_for_case
+        except ImportError:
+            find_case = None
+            build_model_context_for_case = None
+
+    if find_case and build_model_context_for_case:
+        case = find_case(training_type=_label(stage), difficulty=_label(difficulty))
+        if case:
+            _, data_meta = build_model_context_for_case(case)
+            summary.update(
+                {
+                    "case_id": case.get("case_id"),
+                    "source_call_id": case.get("source_call_id"),
+                    **data_meta,
+                }
+            )
+
+    return prompt, summary
+
+
+def build_training_prompt_from_case(
+    case: dict[str, Any],
+    current_state: str | None = None,
+    history: list[dict[str, Any]] | None = None,
+    stage_id: str | None = None,
+    difficulty_id: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Build a non-cached prompt for a fixed JSONL case and runtime state."""
+    try:
+        from .prompt_assembler import assemble_prompt
+        from .training_data_context import build_model_context_for_case
+    except ImportError:
+        from prompt_assembler import assemble_prompt
+        from training_data_context import build_model_context_for_case
+
+    state_machine = case.get("state_machine", {})
+    state = current_state or state_machine.get("initial_state") or "guarded"
+    difficulty = str(case.get("difficulty") or "")
+    if difficulty_id:
+        difficulty_item = load_difficulties().get(difficulty_id)
+        if difficulty_item:
+            difficulty = str(difficulty_item.get("id") or difficulty_item.get("label") or difficulty)
+
+    prompt = assemble_prompt(case, current_state=state, history=history or [], difficulty=difficulty)
+    data_context, data_meta = build_model_context_for_case(case)
+    if data_context:
+        prompt = f"{prompt}\n\n{data_context}"
+
+    role = case.get("customer_role_card", {})
+    stage = load_stages().get(stage_id or "")
+    summary = {
+        "stage_id": stage_id or "",
+        "stage": _label(stage) if stage else str(case.get("training_type", "")),
+        "customer_id": case.get("case_id", ""),
+        "customer": role.get("name") or "客户",
+        "difficulty_id": difficulty_id or str(case.get("difficulty", "")),
+        "difficulty": str(case.get("difficulty", "")),
+        "case_id": case.get("case_id"),
+        "source_call_id": case.get("source_call_id"),
+        "current_state": state,
+        "training_type": case.get("training_type"),
+        **data_meta,
+    }
     return prompt, summary
 
 

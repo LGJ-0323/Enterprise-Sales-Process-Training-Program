@@ -134,12 +134,22 @@ def assemble_prompt(
 
         shot_lines = ["## 真实对话风格参考（请模仿这种语气和回复方式）"]
         for i, ex in enumerate(selected, 1):
-            shot_lines.append(
+            why = ex.get('why', '')
+            # 跳过乱码 why 字段（全是全角问号或占位符的无效内容）
+            is_garbled = (
+                not why
+                or why.count('?') > len(why) * 0.6
+                or why.count('？') > len(why) * 0.6
+                or why.strip() in ('?', '？', '...')
+            )
+            example_block = (
                 f"示例{i}（{ex.get('state', '?')}状态）：\n"
                 f"  销售说：「{ex.get('sales_input', '')}」\n"
-                f"  客户回：「{ex.get('customer_reply', '')}」\n"
-                f"  要点：{ex.get('why', '')}"
+                f"  客户回：「{ex.get('customer_reply', '')}」"
             )
+            if not is_garbled:
+                example_block += f"\n  要点：{why}"
+            shot_lines.append(example_block)
         parts.append("\n".join(shot_lines))
 
     # ── Part 7: 可能异议 ──
@@ -181,11 +191,13 @@ def assemble_prompt(
     parts.append(f"## 当前对话\n{_format_history(history)}")
 
     # ── Part 11: 输出格式 ──
+    valid_states = list(sm.get("states", {}).keys()) or [current_state]
+    state_options = "/".join(str(state) for state in valid_states)
     parts.append(
         "## 输出要求\n"
         "只输出以下 JSON，不要任何其他文字：\n"
         '{"customer_reply": "你的回复（1-3句话，纯文本不要前缀）", '
-        '"next_state": "新状态（guarded/price_concerned/warming_up/open_to_next/shut_down之一）", '
+        f'"next_state": "新状态（{state_options}之一；如果状态不变则输出当前状态）", '
         '"triggered_events": ["触发的事件"], '
         '"score_notes": {"相关维度": "评分依据简要说明"}}'
     )

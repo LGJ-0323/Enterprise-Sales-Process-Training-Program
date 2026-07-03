@@ -48,11 +48,29 @@ def _type_matches(case_type: str, query_type: str) -> bool:
     """模糊匹配 training_type，支持：
     - 精确匹配："回访" == "回访"
     - 子串匹配："报价后回访" 包含 "回访"
+    - 业务别名："陌call" 可匹配 "新客户开发"
     """
-    if case_type == query_type:
-        return True
-    if query_type in case_type or case_type in query_type:
-        return True
+    aliases = {
+        "陌call": "新客户开发",
+        "陌 Call": "新客户开发",
+        "陌拜": "新客户开发",
+        "首次触达": "新客户开发",
+        "cold_call": "新客户开发",
+        "回访": "报价后回访",
+        "follow_up": "报价后回访",
+        "深入回访": "报价后回访",
+        "deep_follow_up": "报价后回访",
+        "逼单": "报价后回访",
+        "closing": "报价后回访",
+    }
+    case_candidates = {case_type, aliases.get(case_type, "")}
+    query_candidates = {query_type, aliases.get(query_type, "")}
+    case_candidates = {item for item in case_candidates if item}
+    query_candidates = {item for item in query_candidates if item}
+    for left in case_candidates:
+        for right in query_candidates:
+            if left == right or left in right or right in left:
+                return True
     return False
 
 
@@ -63,8 +81,8 @@ def _diff_matches(case_diff: str, query_diff: str) -> bool:
     # 中英文映射
     mapping = {
         "初级": "easy", "easy": "初级", "简单": "easy",
-        "中级": "medium", "medium": "中级", "普通": "medium",
-        "高级": "hard", "hard": "高级", "困难": "hard",
+        "中级": "medium", "medium": "中级", "普通": "medium", "normal": "medium",
+        "高级": "hard", "hard": "高级", "困难": "hard", "专家": "hard", "expert": "hard",
         "normal": "medium", "expert": "hard",
     }
     return mapping.get(case_diff) == query_diff or mapping.get(query_diff) == case_diff
@@ -88,10 +106,21 @@ def find_case(
     Returns:
         匹配到的 case dict，如果没有任何匹配返回 None。
     """
+    matches = find_cases(training_type, difficulty, business_line)
+    return matches[0] if matches else None
+
+
+def find_cases(
+    training_type: str,
+    difficulty: str,
+    business_line: str | None = None,
+) -> list[dict[str, Any]]:
+    """返回所有匹配 training_type + difficulty 的候选案例。"""
     cases = _load_all_cases()
     if not cases:
-        return None
+        return []
 
+    matches: list[dict[str, Any]] = []
     # 优先级 1: 三者匹配
     if business_line:
         for case in cases:
@@ -100,7 +129,9 @@ def find_case(
                 and _diff_matches(case.get("difficulty", ""), difficulty)
                 and case.get("business_line") == business_line
             ):
-                return case
+                matches.append(case)
+        if matches:
+            return matches
 
     # 优先级 2: training_type + difficulty
     for case in cases:
@@ -108,13 +139,25 @@ def find_case(
             _type_matches(case.get("training_type", ""), training_type)
             and _diff_matches(case.get("difficulty", ""), difficulty)
         ):
-            return case
+            matches.append(case)
+    if matches:
+        return matches
 
     # 优先级 3: 只匹配 training_type
     for case in cases:
         if _type_matches(case.get("training_type", ""), training_type):
-            return case
+            matches.append(case)
 
+    return matches
+
+
+def get_case(case_id: str | None) -> dict[str, Any] | None:
+    """按 case_id 返回案例。"""
+    if not case_id:
+        return None
+    for case in _load_all_cases():
+        if case.get("case_id") == case_id:
+            return case
     return None
 
 

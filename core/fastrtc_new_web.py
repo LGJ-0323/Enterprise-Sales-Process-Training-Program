@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -57,8 +58,19 @@ from fastrtc.reply_on_pause import AlgoOptions
 
 # ── 训练模块 ────────────────────────────────────────────
 try:
-    from .conversation_store import get_recent_memory, save_turn, update_turn_audio_bytes
+    from .conversation_store import (
+        get_recent_memory,
+        get_session_turns,
+        save_session_evaluation,
+        save_turn,
+        update_turn_audio_bytes,
+    )
+    from .case_loader import get_case
+    from .training_session import advance_session_state, get_or_create_session_context
+    from .training_evaluator import evaluate_training_session
     from .training_config import (
+        _label,
+        build_training_prompt_from_case,
         build_training_prompt_v2,
         difficulty_choices,
         load_avatars,
@@ -71,8 +83,19 @@ try:
         voice_choices,
     )
 except ImportError:
-    from conversation_store import get_recent_memory, save_turn, update_turn_audio_bytes
+    from conversation_store import (
+        get_recent_memory,
+        get_session_turns,
+        save_session_evaluation,
+        save_turn,
+        update_turn_audio_bytes,
+    )
+    from case_loader import get_case
+    from training_session import advance_session_state, get_or_create_session_context
+    from training_evaluator import evaluate_training_session
     from training_config import (
+        _label,
+        build_training_prompt_from_case,
         build_training_prompt_v2,
         difficulty_choices,
         load_avatars,
@@ -119,23 +142,23 @@ def _env_bool(name: str, default: bool) -> bool:
 
 ASR_SAMPLE_RATE = _env_int("WEBRTC_ASR_SAMPLE_RATE", 16000)
 ASR_FORMAT = os.getenv("WEBRTC_ASR_FORMAT", "pcm").strip().lower()
-ASR_TRAILING_SILENCE_MS = _env_int("WEBRTC_ASR_TRAILING_SILENCE_MS", 900)
-ASR_MAX_SENTENCE_SILENCE_MS = _env_int("WEBRTC_ASR_MAX_SENTENCE_SILENCE_MS", 800)
+ASR_TRAILING_SILENCE_MS = _env_int("WEBRTC_ASR_TRAILING_SILENCE_MS", 1200)
+ASR_MAX_SENTENCE_SILENCE_MS = _env_int("WEBRTC_ASR_MAX_SENTENCE_SILENCE_MS", 1200)
 ASR_SEMANTIC_PUNCTUATION_ENABLED = _env_bool("WEBRTC_ASR_SEMANTIC_PUNCTUATION_ENABLED", False)
 ASR_MULTI_THRESHOLD_MODE_ENABLED = _env_bool("WEBRTC_ASR_MULTI_THRESHOLD_MODE_ENABLED", True)
 ASR_USE_CALLBACK = _env_bool("WEBRTC_ASR_USE_CALLBACK", True)
 ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S = _env_float("WEBRTC_ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S", 6.0)
-ASR_CALLBACK_GRACE_S = _env_float("WEBRTC_ASR_CALLBACK_GRACE_S", 0.9)
+ASR_CALLBACK_GRACE_S = _env_float("WEBRTC_ASR_CALLBACK_GRACE_S", 1.4)
 ASR_CALLBACK_FRAME_BYTES = _env_int("WEBRTC_ASR_CALLBACK_FRAME_BYTES", 6400)
 ASR_SYNC_FALLBACK = _env_bool("WEBRTC_ASR_SYNC_FALLBACK", False)
-VAD_AUDIO_CHUNK_DURATION = _env_float("WEBRTC_AUDIO_CHUNK_DURATION", 0.3)
-VAD_STARTED_TALKING_THRESHOLD = _env_float("WEBRTC_STARTED_TALKING_THRESHOLD", 0.08)
-VAD_SPEECH_THRESHOLD = _env_float("WEBRTC_SPEECH_THRESHOLD", 0.05)
-VAD_MAX_CONTINUOUS_SPEECH_S = _env_float("WEBRTC_MAX_CONTINUOUS_SPEECH_S", 8.0)
-VAD_THRESHOLD = _env_float("WEBRTC_VAD_THRESHOLD", 0.42)
-VAD_MIN_SPEECH_DURATION_MS = _env_int("WEBRTC_MIN_SPEECH_DURATION_MS", 120)
-VAD_MIN_SILENCE_DURATION_MS = _env_int("WEBRTC_MIN_SILENCE_DURATION_MS", 1000)
-VAD_SPEECH_PAD_MS = _env_int("WEBRTC_SPEECH_PAD_MS", 300)
+VAD_AUDIO_CHUNK_DURATION = _env_float("WEBRTC_AUDIO_CHUNK_DURATION", 0.45)
+VAD_STARTED_TALKING_THRESHOLD = _env_float("WEBRTC_STARTED_TALKING_THRESHOLD", 0.18)
+VAD_SPEECH_THRESHOLD = _env_float("WEBRTC_SPEECH_THRESHOLD", 0.12)
+VAD_MAX_CONTINUOUS_SPEECH_S = _env_float("WEBRTC_MAX_CONTINUOUS_SPEECH_S", 12.0)
+VAD_THRESHOLD = _env_float("WEBRTC_VAD_THRESHOLD", 0.40)
+VAD_MIN_SPEECH_DURATION_MS = _env_int("WEBRTC_MIN_SPEECH_DURATION_MS", 300)
+VAD_MIN_SILENCE_DURATION_MS = _env_int("WEBRTC_MIN_SILENCE_DURATION_MS", 2500)
+VAD_SPEECH_PAD_MS = _env_int("WEBRTC_SPEECH_PAD_MS", 350)
 
 STAGE_IDS = set(load_stages())
 DIFFICULTY_IDS = set(load_difficulties())
@@ -147,10 +170,83 @@ LAST_STATUS = {
     "time": None, "stage": "idle", "prompt": "", "response_text": "",
     "audio_bytes": 0, "error": "", "training": {}, "timings": {},
 }
+_EVAL_LOCK = threading.Lock()
+_EVAL_JOBS: set[str] = set()
 
 def set_status(stage: str, **kwargs):
     LAST_STATUS.update({"time": datetime.now().isoformat(timespec="seconds"), "stage": stage, "error": "", **kwargs})
     print(f"[{LAST_STATUS['time']}] {stage}: {kwargs}", flush=True)
+
+
+def _merge_state_context(training: dict, context: dict | None) -> None:
+    if not context:
+        return
+    for key in (
+        "current_state",
+        "previous_state",
+        "turn_count",
+        "last_triggered_events",
+        "state_validation",
+        "training_complete",
+        "is_success",
+        "is_failure",
+        "final_state",
+    ):
+        if key in context:
+            training[key] = context.get(key)
+
+
+def _turn_metadata(
+    training: dict,
+    before_state: str | None,
+    requested_next_state: str,
+    triggered_events: list,
+    score_notes: dict,
+) -> dict:
+    return {
+        "case_id": training.get("case_id"),
+        "before_state": before_state,
+        "current_state": training.get("current_state"),
+        "requested_next_state": requested_next_state,
+        "previous_state": training.get("previous_state"),
+        "state_validation": training.get("state_validation"),
+        "triggered_events": triggered_events,
+        "score_notes": score_notes,
+        "training_complete": training.get("training_complete"),
+        "final_state": training.get("final_state"),
+        "is_success": training.get("is_success"),
+        "is_failure": training.get("is_failure"),
+    }
+
+
+def _maybe_evaluate_completed_session(session_id: str, training: dict) -> None:
+    if not training.get("training_complete") or not training.get("case_id"):
+        return
+    with _EVAL_LOCK:
+        if session_id in _EVAL_JOBS:
+            return
+        _EVAL_JOBS.add(session_id)
+
+    def worker() -> None:
+        try:
+            evaluation = evaluate_training_session(
+                session_id=session_id,
+                case_id=training.get("case_id"),
+                source_call_id=training.get("source_call_id"),
+                training_type=training.get("training_type") or training.get("stage"),
+            )
+            save_session_evaluation(session_id, evaluation)
+            live_training = dict(LAST_STATUS.get("training") or {})
+            live_training.update(training)
+            live_training["session_id"] = session_id
+            set_status("evaluation_done", evaluation=evaluation, training=live_training)
+        except Exception as exc:
+            set_status("evaluation_error", error=f"{type(exc).__name__}: {exc}")
+        finally:
+            with _EVAL_LOCK:
+                _EVAL_JOBS.discard(session_id)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 # ═══════════════════════════════════════════════════════
@@ -224,6 +320,75 @@ def clean_customer_reply(raw_text: str, customer_name: str | None = None) -> str
     return cleaned
 
 
+def parse_customer_payload(raw_text: str) -> dict:
+    json_text = _extract_json_object_text(raw_text or "")
+    if not json_text:
+        return {}
+    try:
+        payload = json.loads(json_text)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _history_for_prompt(session_id: str, limit: int = 8) -> list[dict]:
+    try:
+        turns = get_session_turns(session_id)[-limit:]
+    except Exception:
+        return []
+    return [
+        {"user_text": turn.get("user_text", ""), "assistant_text": turn.get("assistant_text", "")}
+        for turn in turns
+    ]
+
+
+def _choice_label(choices: list[tuple[str, str]], value: str) -> str:
+    for label, item_value in choices:
+        if item_value == value:
+            return label
+    return value
+
+
+def _stream_session_key(args: tuple, stage_id: str, difficulty_id: str) -> str:
+    if len(args) >= 4 and isinstance(args[-4], str):
+        candidate = args[-4].strip()
+        if candidate and candidate not in STAGE_IDS and candidate not in DIFFICULTY_IDS and candidate not in VOICE_IDS:
+            return f"webrtc-{candidate}"
+    return f"webrtc-{stage_id}-{difficulty_id}"
+
+
+def _build_session_training_prompt(
+    session_id: str,
+    stage_id: str,
+    difficulty_id: str,
+) -> tuple[str, dict, dict]:
+    stage_label = _choice_label(stage_choices(), stage_id)
+    difficulty_label = _choice_label(difficulty_choices(), difficulty_id)
+    context = get_or_create_session_context(session_id, stage_label, difficulty_label)
+    case = get_case(context.get("case_id"))
+    if not case:
+        prompt, summary = build_training_prompt_v2(stage_id, DEFAULT_CUSTOMER_ID, difficulty_id)
+        summary.update({"session_id": session_id, "case_id": None, "current_state": ""})
+        return prompt, summary, context
+
+    history = _history_for_prompt(session_id)
+    prompt, summary = build_training_prompt_from_case(
+        case,
+        current_state=context.get("current_state"),
+        history=history,
+        stage_id=stage_id,
+        difficulty_id=difficulty_id,
+    )
+    summary.update(
+        {
+            "session_id": session_id,
+            "candidate_count": context.get("candidate_count", 0),
+            "current_state": context.get("current_state"),
+        }
+    )
+    return prompt, summary, context
+
+
 def is_role_reversed_sales_reply(text: str) -> bool:
     c = re.sub(r"\s+", "", text or "")
     if not c: return False
@@ -254,6 +419,75 @@ def sanitize_recent_memory(memory_text: str) -> tuple[str, int]:
 
 def build_role_guard_prompt(customer_name: str | None) -> str:
     return (f"【最高优先级角色校验】\n- 你下一句必须是{customer_name or '当前客户'}作为企业客户的自然回应。\n- role=user 全部来自雄达物流销售；role=assistant 只能来自企业客户。\n- 禁止输出\"我们是雄达物流\"等销售话术。")
+
+
+def build_customer_quality_prompt(memory_text: str) -> str:
+    recent = memory_text.strip() if memory_text else "暂无"
+    return (
+        "【客户智能与反复读要求】\n"
+        "- 先判断销售本轮真实意图：寒暄、公司介绍、询价、问需求、问航线、问痛点、推进下一步。\n"
+        "- 回复必须承接销售刚说的具体内容，不能只泛泛说“请问有什么事”“你们有什么优势”。\n"
+        "- 禁止连续重复近几轮客户已经说过的句式或问题；如果销售重复寒暄，你要转向一个具体业务追问。\n"
+        "- 每轮至少体现一个真实客户判断点：价格透明度、航线/目的港、货量频率、时效稳定性、异常处理、现有货代对比、付款/账期。\n"
+        "- 客户可以防备、犹豫、追问，但要像有业务背景的人，而不是客服机器人。\n"
+        "- 如果销售的话明显没说完，只回复“你先说完，我听着”，不要主动开始新话题。\n"
+        f"【近几轮客户已说过的话，避免复读】\n{recent}"
+    )
+
+
+def _norm_reply(text: str) -> str:
+    return re.sub(r"[\s，。！？!?、,.；;：:\"'“”‘’（）()\[\]{}]+", "", text or "")
+
+
+def _recent_customer_replies(memory_text: str) -> list[str]:
+    replies: list[str] = []
+    for line in (memory_text or "").splitlines():
+        if "客户：" in line:
+            replies.append(line.split("客户：", 1)[1].strip())
+    return replies[-4:]
+
+
+def _looks_low_value_reply(reply: str) -> bool:
+    compact = _norm_reply(reply)
+    generic = (
+        "请问有什么事",
+        "有什么事",
+        "你们有什么事",
+        "你们主要做哪条线",
+        "先说重点",
+        "你们有什么优势",
+        "具体有什么优势",
+    )
+    return any(item in compact for item in generic)
+
+
+def _fallback_customer_reply(user_text: str, training: dict) -> str:
+    text = user_text or ""
+    if any(word in text for word in ("价格", "报价", "便宜", "费用", "成本")):
+        return "价格我会看，但我更关心报价里哪些费用是固定的，哪些后面可能加收。"
+    if any(word in text for word in ("时效", "多久", "延误", "快", "慢")):
+        return "时效你别只说大概，我想知道这条线正常几天到，旺季延误你们怎么处理。"
+    if any(word in text for word in ("欧美", "美国", "欧洲", "东南亚", "海运", "空运", "目的港", "航线")):
+        return "这条线我们确实会关注，但我要先看你们目的港费用和异常处理是不是透明。"
+    if any(word in text for word in ("需求", "发货", "出货", "货量", "合作")):
+        return "我们现在有合作货代，你先说你们能在哪个环节比他们更稳。"
+    state = training.get("current_state") or training.get("attitude") or ""
+    if "warming" in str(state) or "open" in str(state):
+        return "可以，你继续说具体一点。你们现在最有把握的是哪条航线？"
+    return "你先把你们能解决的问题说具体点，别只介绍公司。"
+
+
+def refine_customer_reply(reply: str, user_text: str, memory_text: str, training: dict) -> str:
+    cleaned = (reply or "").strip()
+    if not cleaned:
+        return cleaned
+    compact = _norm_reply(cleaned)
+    recent = [_norm_reply(item) for item in _recent_customer_replies(memory_text)]
+    repeated = bool(compact and any(compact == item or compact in item or item in compact for item in recent if item))
+    if repeated or _looks_low_value_reply(cleaned):
+        return _fallback_customer_reply(user_text, training)
+    return cleaned
+
 
 def synthesize_with_retry(response_text: str, voice_config: dict, attempts: int = 3) -> bytes:
     for attempt in range(1, attempts + 1):
@@ -630,34 +864,60 @@ def run_customer_turn(
 ) -> dict:
     """同步版: ASR 后的 LLM + guardrails + TTS → dict"""
     s, d, v, a = resolve_runtime_selection(stage_id, difficulty_id, voice_id, avatar_id)
-    training_prompt, training_summary = build_training_prompt_v2(s, DEFAULT_CUSTOMER_ID, d)
+    training_prompt, training_summary, session_context = _build_session_training_prompt(session_id, s, d)
     voice_cfg = resolve_voice(v)
     avatar_cfg = resolve_avatar_for_customer(training_summary.get("customer_id"), a)
     st = {**training_summary, "voice_id": v, "voice": voice_cfg.get("label",v),
-          "avatar_id": avatar_cfg.get("id",a), "avatar": avatar_cfg.get("label",a)}
+          "avatar_id": avatar_cfg.get("id",a), "avatar": avatar_cfg.get("label",a),
+          "session_id": session_id}
     raw_mem = get_recent_memory(session_id, limit=10)
     mem, removed = sanitize_recent_memory(raw_mem)
     mem_prompt = f"【当前会话记忆】\n{mem}" if mem else "【当前会话记忆】\n暂无历史对话。"
     avatar_prompt = f"【客户人物形象】\n形象：{avatar_cfg.get('label',a)}\n角色：{avatar_cfg.get('role','')}\n性格：{avatar_cfg.get('temperament','')}"
     guard_prompt = build_role_guard_prompt(training_summary.get("customer"))
+    quality_prompt = build_customer_quality_prompt(mem)
     set_status("loaded", prompt=prompt, training={**st, "session_id": session_id})
-    resp = Generation.call(model=os.getenv("DASHSCOPE_LLM_MODEL","qwen-turbo"),
-        messages=[{"role":"system","content":f"{load_customer_profile()}\n\n{training_prompt}\n\n{avatar_prompt}\n\n{mem_prompt}\n\n{guard_prompt}"},
-                  {"role":"user","content":prompt}], result_format="message")
+    resp = Generation.call(model=os.getenv("DASHSCOPE_LLM_MODEL","qwen-plus"),
+        messages=[{"role":"system","content":f"{training_prompt}\n\n{avatar_prompt}\n\n{mem_prompt}\n\n{guard_prompt}\n\n{quality_prompt}"},
+                  {"role":"user","content":prompt}],
+        result_format="message",
+        temperature=0.45,
+        top_p=0.8,
+        repetition_penalty=1.12,
+        seed=random.randint(1, 2147483647),
+    )
+    payload = {}
+    next_state = ""
+    triggered_events = []
+    score_notes = {}
     if resp.status_code == 200:
-        raw = resp.output.choices[0].message.content; rt = clean_customer_reply(raw, training_summary.get("customer"))
+        raw = resp.output.choices[0].message.content
+        payload = parse_customer_payload(raw)
+        next_state = str(payload.get("next_state") or "")
+        triggered_events = payload.get("triggered_events") if isinstance(payload.get("triggered_events"), list) else []
+        score_notes = payload.get("score_notes") if isinstance(payload.get("score_notes"), dict) else {}
+        rt = clean_customer_reply(raw, training_summary.get("customer"))
         if not rt: rt = raw.strip() or "嗯，您先说说具体想怎么合作？"
+        rt = refine_customer_reply(rt, prompt, mem, st)
         gr = "role_reversed" if is_role_reversed_sales_reply(rt) else ("hostile" if is_hostile_or_confused_user_text(prompt) else "")
         if gr: rt = build_customer_guardrail_reply(prompt, st)
     else: raw = rt = "抱歉，系统开小差了。"; gr = ""
-    set_status("qwen_done", response_text=rt, guardrail=gr or None)
+    before_state = training_summary.get("current_state")
+    next_context = advance_session_state(session_id, next_state, triggered_events) if not gr else session_context
+    _merge_state_context(st, next_context)
+    set_status("qwen_done", response_text=rt, guardrail=gr or None, training=st)
     tid, tix = None, None
     try: tid, tix = save_turn(session_id=session_id, user_text=prompt, assistant_text=rt, training=st,
-        metadata={"stage_id":s,"difficulty_id":d,"voice_id":v,"avatar_id":a})
+        metadata={"stage_id":s,"difficulty_id":d,"voice_id":v,"avatar_id":a,
+                  **_turn_metadata(st, before_state, next_state, triggered_events, score_notes)})
     except Exception as e: set_status("save_error", error=str(e))
+    else:
+        _maybe_evaluate_completed_session(session_id, st)
     ab = synthesize_with_retry(rt, voice_cfg)
     if tid is not None: update_turn_audio_bytes(tid, len(ab))
-    return {"prompt":prompt,"response_text":rt,"raw_response_text":raw,"guardrail":gr,"training":st,"turn_index":tix,"audio_bytes":ab,"sample_rate":24000}
+    return {"prompt":prompt,"response_text":rt,"raw_response_text":raw,"guardrail":gr,"training":st,
+            "turn_index":tix,"audio_bytes":ab,"sample_rate":24000,
+            "next_state": next_state, "triggered_events": triggered_events, "score_notes": score_notes}
 
 
 # ═══════════════════════════════════════════════════════
@@ -739,40 +999,82 @@ def response(audio: tuple[int, np.ndarray], *args):
             return
         set_status("asr_done", prompt=prompt, audio_duration_s=audio_duration_s, timings=timings)
 
-        # 3. LLM (v2 + guardrails)
+        # 3. LLM (JSONL case session + state machine + guardrails)
         prompt_start = time.perf_counter()
-        training_prompt, training_summary = build_training_prompt_v2(s, DEFAULT_CUSTOMER_ID, d)
+        session_key = _stream_session_key(args, s, d)
+        training_prompt, training_summary, session_context = _build_session_training_prompt(session_key, s, d)
         voice_cfg = resolve_voice(v)
-        st = {**training_summary, "voice_id": v, "voice": voice_cfg.get("label",v)}
-        # 会话记忆（WebRTC 用内存 session，以 stage+diff 为 key）
-        session_key = f"webrtc-{s}-{d}"
+        st = {**training_summary, "voice_id": v, "voice": voice_cfg.get("label",v), "session_id": session_key}
         raw_mem = get_recent_memory(session_key, limit=10)
         mem, _ = sanitize_recent_memory(raw_mem)
         mem_prompt = f"【会话记忆】\n{mem}" if mem else "【会话记忆】\n暂无历史对话。"
         guard_prompt = build_role_guard_prompt(training_summary.get("customer"))
+        quality_prompt = build_customer_quality_prompt(mem)
         timings["prompt_build_s"] = _round_time(prompt_start)
         set_status("loaded", prompt=prompt, training=st, timings=timings)
 
         qwen_start = time.perf_counter()
-        resp = Generation.call(model=os.getenv("DASHSCOPE_LLM_MODEL","qwen-turbo"),
-            messages=[{"role":"system","content":f"{load_customer_profile()}\n\n{training_prompt}\n\n{mem_prompt}\n\n{guard_prompt}"},
-                      {"role":"user","content":prompt}], result_format="message")
+        resp = Generation.call(model=os.getenv("DASHSCOPE_LLM_MODEL","qwen-plus"),
+            messages=[{"role":"system","content":f"{training_prompt}\n\n{mem_prompt}\n\n{guard_prompt}\n\n{quality_prompt}"},
+                      {"role":"user","content":prompt}],
+            result_format="message",
+            temperature=0.45,
+            top_p=0.8,
+            repetition_penalty=1.12,
+            seed=random.randint(1, 2147483647),
+        )
         timings["qwen_s"] = _round_time(qwen_start)
 
         if resp.status_code == 200:
             raw = resp.output.choices[0].message.content
+            payload = parse_customer_payload(raw)
+            next_state = str(payload.get("next_state") or "")
+            triggered_events = payload.get("triggered_events") if isinstance(payload.get("triggered_events"), list) else []
+            score_notes = payload.get("score_notes") if isinstance(payload.get("score_notes"), dict) else {}
             rt = clean_customer_reply(raw, training_summary.get("customer"))
             if not rt: rt = raw.strip() or "嗯，您先说说具体想怎么合作？"
-            if is_role_reversed_sales_reply(rt): rt = build_customer_guardrail_reply(prompt, st)
-        else: rt = "抱歉，系统开小差了。"
+            rt = refine_customer_reply(rt, prompt, mem, st)
+            if is_role_reversed_sales_reply(rt):
+                rt = build_customer_guardrail_reply(prompt, st)
+                next_context = session_context
+            else:
+                next_context = advance_session_state(session_key, next_state, triggered_events)
+        else:
+            rt = "抱歉，系统开小差了。"
+            raw = rt
+            payload = {}
+            next_state = ""
+            triggered_events = []
+            score_notes = {}
+            next_context = session_context
+        before_state = training_summary.get("current_state")
+        _merge_state_context(st, next_context)
         timings["response_chars"] = len(rt)
-        set_status("qwen_done", response_text=rt, timings=timings)
+        set_status(
+            "qwen_done",
+            response_text=rt,
+            raw_response_text=raw,
+            next_state=next_state,
+            triggered_events=triggered_events,
+            score_notes=score_notes,
+            training=st,
+            timings=timings,
+        )
 
         # 4. Save turn (SQLite)
         save_start = time.perf_counter()
         try:
-            save_turn(session_id=session_key, user_text=prompt, assistant_text=rt, training=st)
+            save_turn(
+                session_id=session_key,
+                user_text=prompt,
+                assistant_text=rt,
+                training=st,
+                metadata={
+                    **_turn_metadata(st, before_state, next_state, triggered_events, score_notes),
+                },
+            )
             timings["save_s"] = _round_time(save_start)
+            _maybe_evaluate_completed_session(session_key, st)
         except Exception as exc:
             timings["save_s"] = _round_time(save_start)
             timings["save_error"] = f"{type(exc).__name__}: {exc}"

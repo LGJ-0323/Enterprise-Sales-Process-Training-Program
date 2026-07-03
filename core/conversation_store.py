@@ -39,6 +39,13 @@ def init_db() -> None:
                 difficulty_id TEXT,
                 voice_id TEXT,
                 avatar_id TEXT,
+                case_id TEXT,
+                current_state TEXT,
+                final_state TEXT,
+                is_complete INTEGER NOT NULL DEFAULT 0,
+                is_success INTEGER NOT NULL DEFAULT 0,
+                completed_at TEXT,
+                evaluation_json TEXT,
                 turn_count INTEGER NOT NULL DEFAULT 0,
                 memory_text TEXT NOT NULL DEFAULT ''
             );
@@ -77,25 +84,57 @@ def init_db() -> None:
                 ON conversation_memory(session_id, turn_index);
             """
         )
+        _ensure_columns(
+            conn,
+            "conversation_sessions",
+            {
+                "case_id": "TEXT",
+                "current_state": "TEXT",
+                "final_state": "TEXT",
+                "is_complete": "INTEGER NOT NULL DEFAULT 0",
+                "is_success": "INTEGER NOT NULL DEFAULT 0",
+                "completed_at": "TEXT",
+                "evaluation_json": "TEXT",
+            },
+        )
+
+
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    for name, ddl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
 def ensure_session(session_id: str, training: dict[str, Any]) -> None:
     now = utc_now()
+    is_complete = int(bool(training.get("training_complete")))
+    completed_at = now if is_complete else training.get("completed_at")
     with connect() as conn:
         conn.execute(
             """
             INSERT INTO conversation_sessions (
                 session_id, created_at, updated_at,
-                stage_id, customer_id, difficulty_id, voice_id, avatar_id
+                stage_id, customer_id, difficulty_id, voice_id, avatar_id,
+                case_id, current_state, final_state, is_complete, is_success, completed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 updated_at=excluded.updated_at,
                 stage_id=excluded.stage_id,
                 customer_id=excluded.customer_id,
                 difficulty_id=excluded.difficulty_id,
                 voice_id=excluded.voice_id,
-                avatar_id=excluded.avatar_id
+                avatar_id=excluded.avatar_id,
+                case_id=excluded.case_id,
+                current_state=excluded.current_state,
+                final_state=excluded.final_state,
+                is_complete=excluded.is_complete,
+                is_success=excluded.is_success,
+                completed_at=excluded.completed_at
             """,
             (
                 session_id,
@@ -106,6 +145,12 @@ def ensure_session(session_id: str, training: dict[str, Any]) -> None:
                 training.get("difficulty_id"),
                 training.get("voice_id"),
                 training.get("avatar_id"),
+                training.get("case_id"),
+                training.get("current_state"),
+                training.get("final_state"),
+                is_complete,
+                int(bool(training.get("is_success"))),
+                completed_at,
             ),
         )
 
@@ -144,6 +189,12 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             data["metadata"] = {}
     data.pop("metadata_json", None)
+    if data.get("evaluation_json"):
+        try:
+            data["evaluation"] = json.loads(data["evaluation_json"])
+        except json.JSONDecodeError:
+            data["evaluation"] = {}
+    data.pop("evaluation_json", None)
     return data
 
 
@@ -258,6 +309,36 @@ def update_turn_audio_bytes(turn_id: int, audio_bytes: int) -> None:
             "UPDATE conversation_turns SET audio_bytes = ? WHERE id = ?",
             (audio_bytes, turn_id),
         )
+
+
+def save_session_evaluation(session_id: str, evaluation: dict[str, Any]) -> None:
+    init_db()
+    now = utc_now()
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE conversation_sessions
+            SET updated_at = ?, evaluation_json = ?
+            WHERE session_id = ?
+            """,
+            (now, json.dumps(evaluation, ensure_ascii=False), session_id),
+        )
+
+
+def recent_completed_sessions(limit: int = 3) -> list[dict[str, Any]]:
+    init_db()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM conversation_sessions
+            WHERE is_complete = 1
+            ORDER BY COALESCE(completed_at, updated_at) DESC
+            LIMIT ?
+            """,
+            (max(limit, 0),),
+        ).fetchall()
+    return [_row_to_dict(row) or {} for row in rows]
 
 
 init_db()
