@@ -16,12 +16,13 @@ FastAPI 应用，提供移动 H5 页面和后端接口：
 
 from __future__ import annotations
 from starlette.websockets import WebSocket, WebSocketDisconnect
-from starlette.responses import HTMLResponse, RedirectResponse
+from starlette.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 import uvicorn
 
 import base64
 import os
+import random
 from pathlib import Path
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
@@ -35,22 +36,40 @@ except ImportError:
 
 try:
     from .conversation_store import get_session, get_session_turns
-    from .fastrtc_new_wechat import (
+    from .fastrtc_new_web import (
         LAST_STATUS,
         pcm_to_wav_bytes,
         run_customer_turn,
         transcribe_uploaded_audio,
+    )
+    from .fastrtc_new_web import (
+        DEFAULT_STAGE_ID,
+        DEFAULT_DIFFICULTY_ID,
+        DEFAULT_VOICE_ID,
+        resolve_voice,
     )
     from .training_config import difficulty_choices, stage_choices, voice_choices
+    from .training_config import resolve_training, _label
+    from .case_loader import get_case, find_cases, case_count as get_case_count
+    from .training_data_context import summarize_case_assets
 except ImportError:
     from conversation_store import get_session, get_session_turns
-    from fastrtc_new_wechat import (
+    from fastrtc_new_web import (
         LAST_STATUS,
         pcm_to_wav_bytes,
         run_customer_turn,
         transcribe_uploaded_audio,
     )
+    from fastrtc_new_web import (
+        DEFAULT_STAGE_ID,
+        DEFAULT_DIFFICULTY_ID,
+        DEFAULT_VOICE_ID,
+        resolve_voice,
+    )
     from training_config import difficulty_choices, stage_choices, voice_choices
+    from training_config import resolve_training, _label
+    from case_loader import get_case, find_cases, case_count as get_case_count
+    from training_data_context import summarize_case_assets
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -287,7 +306,7 @@ MOBILE_HTML = """
     let startedAt = 0;
     let timerId = null;
     let unlockedAudioContext = null;
-    const sessionId = localStorage.getItem("mobile_training_session_id") || `h5-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const sessionId = `h5-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     localStorage.setItem("mobile_training_session_id", sessionId);
 
     function setStatus(text, isError = false) {
@@ -650,6 +669,65 @@ async def client_log(request: Request):
     return {"ok": True}
 
 
+# ── 训练资料 API ──────────────────────────────────────────
+
+def _resolve_case_for_wechat(
+    stage_id: str,
+    difficulty_id: str,
+    case_id: str | None = None,
+):
+    """解析训练配置并匹配案例（wechat 版轻量实现）。"""
+    stage, customer, difficulty = resolve_training(
+        stage_id, None, difficulty_id)
+    case = get_case(case_id) if case_id else None
+    if not case:
+        candidates = find_cases(_label(stage), _label(difficulty))
+        case = random.choice(candidates) if candidates else None
+    return stage, customer, difficulty, case
+
+
+@app.get("/api/persona")
+async def api_persona(
+    stage_id: str = "cold_call",
+    difficulty_id: str = "easy",
+    voice_id: str = "longsanshu_v3",
+):
+    try:
+        stage, customer, difficulty, case = _resolve_case_for_wechat(
+            stage_id, difficulty_id)
+        voice = resolve_voice(voice_id)
+        assets = summarize_case_assets(case)
+        return {
+            "name": assets.get("customer_name") or customer.get("name", "?"),
+            "role": assets.get("customer_role") or customer.get("role", ""),
+            "style": assets.get("communication_style") or customer.get("attitude", {}).get("label", ""),
+            "desc": assets.get("scene") or customer.get("attitude", {}).get("style", ""),
+            "traits": assets.get("main_concerns") or [],
+            "goal": stage.get("training_goal", ""),
+            "voice_label": voice.get("label", voice_id),
+            "stage": _label(stage),
+            "difficulty": _label(difficulty),
+            "case_fewshot": assets.get("few_shot_count", 0),
+            "case_total": get_case_count(),
+            "raw_call_id": assets.get("raw_call_id"),
+            "rubric_id": assets.get("rubric_id"),
+        }
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/training-assets")
+async def api_training_assets(
+    stage_id: str = "cold_call",
+    difficulty_id: str = "easy",
+):
+    try:
+        _, _, _, case = _resolve_case_for_wechat(stage_id, difficulty_id)
+        return summarize_case_assets(case)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 # ── WebSocket 端点 ─────────────────────────────────────────
 
 @app.websocket("/ws/audio-probe")
@@ -724,7 +802,52 @@ REALTIME_HTML = """<!doctype html>
   .interim { font-size: 13px; color: var(--muted); font-style: italic; padding: 4px 0; min-height: 20px; }
   .error { color: var(--warn); white-space: pre-wrap; font-size: 13px; }
   .tip-box { background: #fffaeb; border: 1px solid #fedf89; border-radius: 8px; padding: 10px 14px; font-size: 13px; color: #b54708; }
-</style>
+  /* ── 客户画像 + 训练目标卡片 ── */
+  .persona-goal-card { display: none; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .persona-goal-card.show { display: block; }
+  .card-toggle { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; cursor: pointer; user-select: none; border-bottom: 1px solid var(--line); }
+  .card-toggle .label { font-size: 14px; font-weight: 750; color: var(--ink); }
+  .card-toggle .arrow { font-size: 12px; color: var(--muted); transition: transform 0.2s; }
+  .card-toggle.open .arrow { transform: rotate(180deg); }
+  .card-body { display: none; padding: 12px 14px; }
+  .card-body.show { display: block; }
+  .persona-row { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 10px; }
+  .persona-avatar { width: 44px; height: 44px; border-radius: 50%; background: var(--soft); border: 1px solid #b8ddda; display: grid; place-items: center; font-size: 18px; flex-shrink: 0; color: var(--brand-dark); }
+  .persona-info { flex: 1; min-width: 0; }
+  .persona-name { font-size: 16px; font-weight: 800; margin-bottom: 2px; }
+  .persona-meta { font-size: 12px; color: var(--muted); line-height: 1.4; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+  .tag-sm { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; background: #f1f5f9; color: #475569; }
+  .goal-row { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+  .goal-text { font-size: 13px; color: var(--ink); line-height: 1.5; margin-bottom: 6px; }
+  .must-list { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .must-list span { display: inline-block; margin-right: 8px; }
+  .must-list .do { color: #027a48; }
+  .must-list .dont { color: #b42318; }
+  /* ── 评分面板 ── */
+  .scoring-panel { display: none; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .scoring-panel.show { display: block; }
+  .score-header { display: flex; align-items: flex-end; gap: 10px; padding: 14px; }
+  .score-big { font-size: 46px; font-weight: 900; line-height: 1; color: var(--brand-dark); }
+  .score-label { font-size: 13px; color: var(--muted); padding-bottom: 6px; }
+  .dim-bars { padding: 0 14px 14px; display: grid; gap: 8px; }
+  .dim-row { display: grid; grid-template-columns: 80px 1fr 36px; gap: 8px; align-items: center; font-size: 12px; }
+  .dim-name { color: #344054; font-weight: 650; }
+  .dim-track { height: 6px; border-radius: 3px; background: #e8eef6; overflow: hidden; }
+  .dim-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--brand), #2563eb); transition: width 0.4s; }
+  .dim-pct { text-align: right; color: var(--muted); font-weight: 700; }
+  .feedback-section { border-top: 1px solid var(--line); padding: 12px 14px; display: grid; gap: 8px; }
+  .fb-item { display: flex; gap: 8px; font-size: 13px; line-height: 1.45; padding: 8px 10px; border-radius: 7px; }
+  .fb-item.good { background: #ecfdf3; }
+  .fb-item.warn { background: #fffaeb; }
+  .fb-item.bad { background: #fef3f2; }
+  .fb-icon { font-weight: 900; flex-shrink: 0; width: 18px; text-align: center; }
+  /* ── State 变更 Toast ── */
+  .state-toast { position: fixed; top: 18px; left: 50%; transform: translateX(-50%); padding: 8px 18px; border-radius: 20px; background: #172033; color: #fff; font-size: 13px; font-weight: 700; z-index: 999; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+  .state-toast.show { opacity: 1; }
+  /* ── 会话信息栏 ── */
+  .session-info { display: none; font-size: 11px; color: var(--muted); text-align: center; padding: 4px 0; }
+  .session-info.show { display: block; }</style>
 </head>
 <body>
 <main class="app">
@@ -751,6 +874,31 @@ REALTIME_HTML = """<!doctype html>
     <span id="statusText">准备就绪</span>
   </div>
 
+  <!-- 客户画像 + 训练目标（服务端下发后展示） -->
+  <section class="persona-goal-card" id="personaGoalCard">
+    <div class="card-toggle" id="personaToggle" onclick="toggleCard('personaGoalCard','personaToggle','personaBody')">
+      <span class="label">客户画像 & 训练目标</span>
+      <span class="arrow">▼</span>
+    </div>
+    <div class="card-body show" id="personaBody">
+      <div class="persona-row">
+        <div class="persona-avatar" id="personaAvatar">🧑</div>
+        <div class="persona-info">
+          <div class="persona-name" id="personaName">等待中...</div>
+          <div class="persona-meta" id="personaMeta"></div>
+        </div>
+      </div>
+      <div class="tags" id="personaTags"></div>
+      <div class="goal-row">
+        <div class="goal-text" id="goalText"></div>
+        <div class="must-list">
+          <span class="do" id="goalMust"></span>
+          <span class="dont" id="goalCritical"></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ASR 中间文本 -->
   <div class="interim" id="interim"></div>
 
@@ -766,10 +914,32 @@ REALTIME_HTML = """<!doctype html>
     </div>
   </section>
 
+  <!-- 评分面板（每轮/终局） -->
+  <section class="scoring-panel" id="scoringPanel">
+    <div class="card-toggle" id="scoreToggle" onclick="toggleCard('scoringPanel','scoreToggle','scoreBody')">
+      <span class="label">实时评分</span>
+      <span class="arrow">▼</span>
+    </div>
+    <div class="card-body show" id="scoreBody">
+      <div class="score-header">
+        <div class="score-big" id="scoreBig">--</div>
+        <div class="score-label" id="scoreLabel">等待训练</div>
+      </div>
+      <div class="dim-bars" id="dimBars"></div>
+      <div class="feedback-section" id="feedbackSection"></div>
+    </div>
+  </section>
+
+  <!-- 会话信息栏 -->
+  <div class="session-info" id="sessionInfo"></div>
+
   <div class="tip-box" id="compatNote">
     💡 <strong>iOS 企微用户</strong>：如无法授权麦克风或音频卡顿，请切换到
     <a href="/mobile">对讲机模式</a>。
   </div>
+
+  <!-- State 变更浮动提示 -->
+  <div class="state-toast" id="stateToast"></div>
 </main>
 
 <script>
@@ -782,14 +952,21 @@ const els = {
   statusBar: $("statusBar"), statusDot: $("statusDot"), statusText: $("statusText"),
   interim: $("interim"), actionBtn: $("actionBtn"), wsIndicator: $("wsIndicator"),
   conversation: $("conversation"), configSection: $("configSection"),
+  // 新增 UI 元素
+  personaGoalCard: $("personaGoalCard"), personaToggle: $("personaToggle"), personaBody: $("personaBody"),
+  personaName: $("personaName"), personaMeta: $("personaMeta"), personaTags: $("personaTags"),
+  goalText: $("goalText"), goalMust: $("goalMust"), goalCritical: $("goalCritical"),
+  scoringPanel: $("scoringPanel"), scoreBig: $("scoreBig"), scoreLabel: $("scoreLabel"),
+  dimBars: $("dimBars"), feedbackSection: $("feedbackSection"),
+  stateToast: $("stateToast"), sessionInfo: $("sessionInfo"),
 };
 
 // ═══════════════════════════════════════════════════
 //  状态
 // ═══════════════════════════════════════════════════
-const SAMPLE_RATE = 16000;
+const REQUESTED_SAMPLE_RATE = 16000;
 const CHUNK_MS = 100;
-const CHUNK_SAMPLES = Math.floor(SAMPLE_RATE * CHUNK_MS / 1000);
+const CHUNK_SAMPLES = Math.floor(REQUESTED_SAMPLE_RATE * CHUNK_MS / 1000);
 const SCRIPT_BUFFER_SIZE = 2048;
 
 let ws = null;
@@ -798,8 +975,11 @@ let stream = null;
 let active = false;
 let currentStage = "idle";
 let lastLevelUpdateAt = 0;
-let sessionId = localStorage.getItem("ws_voice_session_id") || `ws-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-localStorage.setItem("ws_voice_session_id", sessionId);
+let sessionId = `ws-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+function getInputSampleRate() {
+  return Math.round((audioCtx && audioCtx.sampleRate) || REQUESTED_SAMPLE_RATE);
+}
 
 // ═══════════════════════════════════════════════════
 //  UI helpers
@@ -831,6 +1011,99 @@ function fillSelect(sel, opts, val) {
 }
 
 // ═══════════════════════════════════════════════════
+//  面板折叠
+// ═══════════════════════════════════════════════════
+function toggleCard(cardId, toggleId, bodyId) {
+  const toggle = document.getElementById(toggleId);
+  const body = document.getElementById(bodyId);
+  if (!toggle || !body) return;
+  const open = body.classList.contains("show");
+  if (open) { body.classList.remove("show"); toggle.classList.remove("open"); }
+  else { body.classList.add("show"); toggle.classList.add("open"); }
+}
+
+// ═══════════════════════════════════════════════════
+//  消息渲染函数
+// ═══════════════════════════════════════════════════
+function renderPersona(msg) {
+  els.personaName.textContent = msg.name || "客户";
+  const meta = [msg.role, msg.location, msg.style].filter(Boolean).join(" · ");
+  els.personaMeta.textContent = meta || msg.stage_label || "";
+  els.personaTags.innerHTML = (msg.concerns || []).map(c => `<span class="tag-sm">${c}</span>`).join("");
+  els.personaGoalCard.classList.add("show");
+}
+
+function renderGoal(msg) {
+  els.goalText.textContent = msg.goal || "";
+  const must = (msg.must_do || []).slice(0, 3).map(s => `✅ ${s}`).join(" ");
+  const critical = (msg.critical || []).slice(0, 2).map(s => `🚫 ${s}`).join(" ");
+  els.goalMust.innerHTML = must;
+  els.goalCritical.innerHTML = critical;
+}
+
+function showStateChangeToast(msg) {
+  const toast = els.stateToast;
+  toast.textContent = `客户状态：${msg.from || "?"} → ${msg.to || "?"}`;
+  toast.classList.add("show");
+  setTimeout(() => toast.classList.remove("show"), 2500);
+}
+
+function renderEvaluation(msg) {
+  const score = msg.score != null ? msg.score : "--";
+  els.scoreBig.textContent = score;
+  els.scoreLabel.textContent = msg.terminal ? (msg.is_success ? "会话成功" : "会话结束") : "本轮综合得分";
+  // 维度进度条
+  const dims = msg.dimensions || [];
+  if (dims.length > 0) {
+    els.dimBars.innerHTML = dims.map(d => {
+      const pct = d.max ? Math.round(d.score * 100 / d.max) : d.score;
+      return `<div class="dim-row"><span class="dim-name">${d.name}</span><div class="dim-track"><div class="dim-fill" style="width:${pct}%"></div></div><span class="dim-pct">${pct}%</span></div>`;
+    }).join("");
+  }
+  els.scoringPanel.classList.add("show");
+}
+
+function renderFinalEvaluation(msg) {
+  renderEvaluation(msg);
+  els.scoreLabel.textContent = msg.source === "llm" ? "AI 复盘得分 / 100" : "综合评分 / 100";
+  // 教练反馈
+  const fb = [];
+  if (msg.strengths && msg.strengths.length) fb.push({ kind: "good", icon: "✓", text: msg.strengths[0] });
+  if (msg.improvements && msg.improvements.length) fb.push({ kind: "warn", icon: "!", text: msg.improvements[0] });
+  if (msg.summary) fb.push({ kind: "bad", icon: "✕", text: msg.summary });
+  els.feedbackSection.innerHTML = fb.map(f =>
+    `<div class="fb-item ${f.kind}"><span class="fb-icon">${f.icon}</span><span>${f.text}</span></div>`
+  ).join("");
+}
+
+function updateSessionInfo(msg) {
+  const parts = [];
+  if (msg.turn_count != null) parts.push(`${msg.turn_count} 轮`);
+  if (msg.current_state) parts.push(`状态: ${msg.current_state}`);
+  if (msg.total_asr_s != null) parts.push(`ASR ${msg.total_asr_s.toFixed(1)}s`);
+  if (msg.total_llm_s != null) parts.push(`LLM ${msg.total_llm_s.toFixed(1)}s`);
+  els.sessionInfo.textContent = parts.join(" · ");
+  els.sessionInfo.classList.add("show");
+}
+
+function resetPanels() {
+  els.personaGoalCard.classList.remove("show");
+  els.personaName.textContent = "等待中...";
+  els.personaMeta.textContent = "";
+  els.personaTags.innerHTML = "";
+  els.goalText.textContent = "";
+  els.goalMust.innerHTML = "";
+  els.goalCritical.innerHTML = "";
+  els.scoringPanel.classList.remove("show");
+  els.scoreBig.textContent = "--";
+  els.scoreLabel.textContent = "等待训练";
+  els.dimBars.innerHTML = "";
+  els.feedbackSection.innerHTML = "";
+  els.sessionInfo.classList.remove("show");
+  els.sessionInfo.textContent = "";
+}
+
+// ═══════════════════════════════════════════════════
 //  音频播放队列
 // ═══════════════════════════════════════════════════
 const playQueue = [];
@@ -841,18 +1114,28 @@ function enqueueAudio(pcm16Buffer) {
   if (!playing) drainQueue();
 }
 
+let ttsGainNode = null;
+
 function drainQueue() {
   if (playQueue.length === 0) { playing = false; return; }
   playing = true;
   const buf = playQueue.shift();
   try {
+    if (!audioCtx) return;
+    // 懒初始化 TTS 增益节点
+    if (!ttsGainNode) {
+      ttsGainNode = audioCtx.createGain();
+      ttsGainNode.gain.value = 0.9;
+      ttsGainNode.connect(audioCtx.destination);
+    }
+    const sampleRate = audioCtx.sampleRate || 24000;
     const float32 = new Float32Array(buf.length);
     for (let i = 0; i < buf.length; i++) float32[i] = buf[i] / 32768;
     const ab = audioCtx.createBuffer(1, float32.length, 24000);
     ab.getChannelData(0).set(float32);
     const src = audioCtx.createBufferSource();
     src.buffer = ab;
-    src.connect(audioCtx.destination);
+    src.connect(ttsGainNode);
     src.onended = drainQueue;
     src.start();
   } catch (e) {
@@ -882,15 +1165,22 @@ async function unlockAudio() {
 //  PCM 采集（ScriptProcessor → WebSocket）
 // ═══════════════════════════════════════════════════
 let scriptProcessor = null;
+let silentGainNode = null;
 
 async function startMic() {
+  // 先清理旧节点
+  if (silentGainNode) { silentGainNode.disconnect(); silentGainNode = null; }
+
   stream = await navigator.mediaDevices.getUserMedia({
-    audio: { sampleRate: SAMPLE_RATE, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+    audio: {
+      sampleRate: REQUESTED_SAMPLE_RATE, channelCount: 1,
+      echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+    }
   });
 
   if (!audioCtx) {
     const AC = window.AudioContext || window.webkitAudioContext;
-    audioCtx = new AC({ sampleRate: SAMPLE_RATE });
+    audioCtx = new AC({ sampleRate: REQUESTED_SAMPLE_RATE });
   }
 
   const source = audioCtx.createMediaStreamSource(stream);
@@ -899,32 +1189,47 @@ async function startMic() {
   scriptProcessor.onaudioprocess = (e) => {
     if (!active || !ws || ws.readyState !== WebSocket.OPEN) return;
     const input = e.inputBuffer.getChannelData(0);
-    const int16 = new Int16Array(input.length);
+    // 计算 RMS + 噪声门限
     let sumSq = 0;
+    for (let i = 0; i < input.length; i++) sumSq += input[i] * input[i];
+    const rms = Math.sqrt(sumSq / input.length);
+    // 环境底噪跳过，减少服务端无效处理
+    if (rms < 0.0025) return;
+    // PCM 转换（稍降增益，减少削波）
+    const gain = 0.85;
+    const int16 = new Int16Array(input.length);
     for (let i = 0; i < input.length; i++) {
-      sumSq += input[i] * input[i];
-      int16[i] = Math.max(-32768, Math.min(32767, input[i] * 32768));
+      int16[i] = Math.max(-32768, Math.min(32767, input[i] * 32768 * gain));
     }
     const now = Date.now();
     if (currentStage === "listening" && now - lastLevelUpdateAt > 250) {
-      const rms = Math.sqrt(sumSq / input.length);
       const bars = Math.min(10, Math.round(rms * 180));
       els.interim.textContent = bars > 0
         ? `麦克风输入 ${"▮".repeat(bars)}${"▯".repeat(10 - bars)}`
         : "正在听你说话...";
       lastLevelUpdateAt = now;
     }
-    ws.send(int16.buffer);
+    if (ws.bufferedAmount < 65536) {
+      ws.send(int16.buffer);
+    }
   };
 
   source.connect(scriptProcessor);
-  scriptProcessor.connect(audioCtx.destination); // 不回显但需要连接
+  // 接到静音节点，保持 onaudioprocess 触发但不回放麦克风
+  silentGainNode = audioCtx.createGain();
+  silentGainNode.gain.value = 0;
+  scriptProcessor.connect(silentGainNode);
+  silentGainNode.connect(audioCtx.destination);
 }
 
 function stopMic() {
   if (scriptProcessor) {
     scriptProcessor.disconnect();
     scriptProcessor = null;
+  }
+  if (silentGainNode) {
+    silentGainNode.disconnect();
+    silentGainNode = null;
   }
   if (stream) {
     stream.getTracks().forEach(t => t.stop());
@@ -951,6 +1256,7 @@ function connectWS() {
         stage_id: els.stage.value,
         difficulty_id: els.difficulty.value,
         voice_id: els.voice.value,
+        sample_rate: getInputSampleRate(),
       }
     }));
   };
@@ -990,6 +1296,12 @@ function handleWSMessage(msg) {
     case "status":
       setStatus(msg.stage || "idle", msg.detail || msg.stage || "");
       break;
+    case "persona":
+      renderPersona(msg);
+      break;
+    case "goal":
+      renderGoal(msg);
+      break;
     case "asr_final":
       els.interim.textContent = "";
       addBubble("user", "我", msg.text);
@@ -999,6 +1311,18 @@ function handleWSMessage(msg) {
       break;
     case "tts_done":
       setStatus("listening", "继续说话");
+      break;
+    case "evaluation":
+      renderEvaluation(msg);
+      break;
+    case "final_evaluation":
+      renderFinalEvaluation(msg);
+      break;
+    case "state_change":
+      showStateChangeToast(msg);
+      break;
+    case "session_info":
+      updateSessionInfo(msg);
       break;
     case "session_end":
       setStatus("idle", `会话结束，共 ${msg.turn_count || 0} 轮`);
@@ -1031,6 +1355,8 @@ els.actionBtn.addEventListener("click", async () => {
     try {
       await unlockAudio();
       await startMic();
+      resetPanels();
+      sessionId = `ws-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       connectWS();
       active = true;
       setStatus("listening", "正在听你说话...");
@@ -1080,4 +1406,7 @@ async def realtime_page():
 if __name__ == "__main__":
     host = os.getenv("WECHAT_APP_HOST", "127.0.0.1")
     port = int(os.getenv("WECHAT_APP_PORT", "8511"))
+    print(f"\n  http://{host}:{port}/mobile      |  H5 对讲机模式（录音上传）")
+    print(f"  http://{host}:{port}/realtime    |  实时 WebSocket 语音模式")
+    print(f"  http://{host}:{port}/debug/status  |  调试状态\n")
     uvicorn.run(app, host=host, port=port, reload=False)

@@ -92,7 +92,7 @@ from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionRes
 from dashscope.audio.tts_v2 import AudioFormat, SpeechSynthesizer
 from fastrtc import ReplyOnPause, Stream, audio_to_bytes
 from fastrtc.pause_detection.silero import SileroVadOptions
-from fastrtc.reply_on_pause import AlgoOptions
+from fastrtc.reply_on_pause import AlgoOptions, create_message
 
 # ── 训练模块 ────────────────────────────────────────────
 try:
@@ -195,6 +195,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 ASR_SAMPLE_RATE = _env_int("WEBRTC_ASR_SAMPLE_RATE", 16000)
 ASR_FORMAT = os.getenv("WEBRTC_ASR_FORMAT", "pcm").strip().lower()
+ASR_LEADING_SILENCE_MS = _env_int("WEBRTC_ASR_LEADING_SILENCE_MS", 350)
 ASR_TRAILING_SILENCE_MS = _env_int("WEBRTC_ASR_TRAILING_SILENCE_MS", 4500)
 ASR_MAX_SENTENCE_SILENCE_MS = _env_int("WEBRTC_ASR_MAX_SENTENCE_SILENCE_MS", 4500)
 ASR_SEMANTIC_PUNCTUATION_ENABLED = _env_bool("WEBRTC_ASR_SEMANTIC_PUNCTUATION_ENABLED", False)
@@ -214,7 +215,9 @@ VAD_MAX_CONTINUOUS_SPEECH_S = _env_float("WEBRTC_MAX_CONTINUOUS_SPEECH_S", 30.0)
 VAD_THRESHOLD = _env_float("WEBRTC_VAD_THRESHOLD", 0.40)
 VAD_MIN_SPEECH_DURATION_MS = _env_int("WEBRTC_MIN_SPEECH_DURATION_MS", 300)
 VAD_MIN_SILENCE_DURATION_MS = _env_int("WEBRTC_MIN_SILENCE_DURATION_MS", 4500)
+VAD_REPLY_PAUSE_MS = _env_int("WEBRTC_REPLY_PAUSE_MS", VAD_MIN_SILENCE_DURATION_MS)
 VAD_SPEECH_PAD_MS = _env_int("WEBRTC_SPEECH_PAD_MS", 600)
+VAD_PREROLL_MS = _env_int("WEBRTC_PREROLL_MS", max(VAD_SPEECH_PAD_MS, 1500))
 
 STAGE_IDS = set(load_stages())
 DIFFICULTY_IDS = set(load_difficulties())
@@ -595,6 +598,78 @@ def synthesize_with_retry(response_text: str, voice_config: dict, attempts: int 
     raise RuntimeError(f"TTS failed after {attempts} attempts")
 
 
+class ReplyOnStablePause(ReplyOnPause):
+    """ReplyOnPause with pre-roll and continuous-silence pause detection."""
+
+    def copy(self):
+        return ReplyOnStablePause(
+            self.fn,
+            self.startup_fn,
+            self.algo_options,
+            self.model_options,
+            self.can_interrupt,
+            self.expected_layout,
+            self.output_sample_rate,
+            self.output_frame_size,
+            self.input_sample_rate,
+            self.model,
+            self.needs_args,
+        )
+
+    def _append_preroll(self, state, audio: np.ndarray, sampling_rate: int) -> None:
+        max_samples = max(0, int(sampling_rate * VAD_PREROLL_MS / 1000))
+        if max_samples <= 0:
+            return
+        previous = getattr(state, "_preroll_audio", None)
+        combined = audio if previous is None else np.concatenate((previous, audio))
+        if combined.size > max_samples:
+            combined = combined[-max_samples:]
+        setattr(state, "_preroll_audio", combined)
+
+    @staticmethod
+    def _append_stream(state, audio: np.ndarray) -> None:
+        if state.stream is None:
+            state.stream = audio
+        else:
+            state.stream = np.concatenate((state.stream, audio))
+
+    def determine_pause(self, audio: np.ndarray, sampling_rate: int, state) -> bool:
+        duration = len(audio) / sampling_rate
+        if duration < self.algo_options.audio_chunk_duration:
+            return False
+
+        dur_vad, _ = self.model.vad((sampling_rate, audio), self.model_options)
+        was_started = state.started_talking
+        if dur_vad > self.algo_options.started_talking_threshold and not state.started_talking:
+            state.started_talking = True
+            setattr(state, "_stable_silence_s", 0.0)
+            self.send_message_sync(create_message("log", "started_talking"))
+
+        if state.started_talking:
+            if not was_started:
+                preroll = getattr(state, "_preroll_audio", None)
+                if preroll is not None and preroll.size > 0:
+                    self._append_stream(state, preroll)
+                setattr(state, "_preroll_audio", None)
+            self._append_stream(state, audio)
+        else:
+            self._append_preroll(state, audio, sampling_rate)
+            state.buffer = None
+            return False
+
+        state.buffer = None
+        current_duration = len(state.stream) / sampling_rate if state.stream is not None else 0.0
+        if current_duration >= self.algo_options.max_continuous_speech_s:
+            return True
+
+        if dur_vad < self.algo_options.speech_threshold:
+            stable_silence_s = getattr(state, "_stable_silence_s", 0.0) + duration
+        else:
+            stable_silence_s = 0.0
+        setattr(state, "_stable_silence_s", stable_silence_s)
+        return stable_silence_s >= max(0.0, VAD_REPLY_PAUSE_MS / 1000)
+
+
 def _round_time(start: float) -> float:
     return round(time.perf_counter() - start, 3)
 
@@ -639,6 +714,10 @@ def _prepare_webrtc_asr_pcm(audio: tuple[int, np.ndarray]) -> tuple[str, list[st
 
     pcm_start = time.perf_counter()
     source_pcm = _audio_array_to_int16_mono(audio[1])
+    leading_samples = max(0, int(int(audio[0]) * ASR_LEADING_SILENCE_MS / 1000))
+    if leading_samples:
+        source_pcm = np.concatenate((np.zeros(leading_samples, dtype=np.int16), source_pcm))
+        metrics["audio_leading_silence_ms"] = ASR_LEADING_SILENCE_MS
     metrics["audio_pcm_bytes_raw"] = int(source_pcm.nbytes)
     metrics["audio_pcm_prepare_s"] = _round_time(pcm_start)
 
@@ -729,6 +808,7 @@ def _prepare_webrtc_asr_mp3(
     temp_paths.append(input_path)
 
     metrics["asr_format"] = "mp3"
+    leading_silence_ms = max(0, ASR_LEADING_SILENCE_MS)
     trailing_silence_s = max(0.0, ASR_TRAILING_SILENCE_MS / 1000)
     if not shutil.which("ffmpeg"):
         metrics["audio_transcode_skipped"] = "ffmpeg_not_found"
@@ -751,7 +831,7 @@ def _prepare_webrtc_asr_mp3(
                 "-i",
                 input_path,
                 "-af",
-                f"apad=pad_dur={trailing_silence_s}",
+                f"adelay={leading_silence_ms}:all=1,apad=pad_dur={trailing_silence_s}",
                 "-vn",
                 "-ac",
                 "1",
@@ -767,6 +847,8 @@ def _prepare_webrtc_asr_mp3(
             capture_output=True,
             text=True,
         )
+        if leading_silence_ms:
+            metrics["audio_leading_silence_ms"] = leading_silence_ms
         if trailing_silence_s:
             metrics["audio_trailing_silence_ms"] = ASR_TRAILING_SILENCE_MS
         metrics["audio_transcode_s"] = _round_time(transcode_start)
@@ -1064,6 +1146,13 @@ def response(audio: tuple[int, np.ndarray], *args):
 
         audio_duration_s = _audio_duration_s(audio)
         timings.update(_audio_level_metrics(audio))
+        timings.update(
+            {
+                "vad_reply_pause_ms": VAD_REPLY_PAUSE_MS,
+                "vad_preroll_ms": VAD_PREROLL_MS,
+                "asr_leading_silence_ms": ASR_LEADING_SILENCE_MS,
+            }
+        )
         set_status(
             "received_audio",
             prompt="",
@@ -1252,7 +1341,7 @@ def response(audio: tuple[int, np.ndarray], *args):
 
 stream = Stream(
     modality="audio", mode="send-receive",
-    handler=ReplyOnPause(
+    handler=ReplyOnStablePause(
         response,
         algo_options=AlgoOptions(
             audio_chunk_duration=VAD_AUDIO_CHUNK_DURATION,

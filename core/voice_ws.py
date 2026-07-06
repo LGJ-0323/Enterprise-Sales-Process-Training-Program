@@ -31,8 +31,16 @@ from typing import Any
 
 try:
     from .fastrtc_new_web import LAST_STATUS as WEB_LAST_STATUS, run_customer_turn, set_status
+    from .fastrtc_new_web import _build_session_training_prompt, _choice_label
+    from .case_loader import get_case
+    from .training_data_context import summarize_case_assets
+    from .training_config import load_stages, stage_choices, difficulty_choices
 except ImportError:
     from fastrtc_new_web import LAST_STATUS as WEB_LAST_STATUS, run_customer_turn, set_status
+    from fastrtc_new_web import _build_session_training_prompt, _choice_label
+    from case_loader import get_case
+    from training_data_context import summarize_case_assets
+    from training_config import load_stages, stage_choices, difficulty_choices
 
 import dashscope
 from dashscope import Generation
@@ -51,16 +59,20 @@ BYTES_PER_FRAME = SAMPLE_WIDTH * CHANNELS
 # ── VAD 参数（能量检测） ─────────────────────────────
 VAD_THRESHOLD = float(os.getenv("WS_VAD_THRESHOLD", "0.018"))       # RMS 阈值
 VAD_MIN_SPEECH_MS = int(os.getenv("WS_VAD_MIN_SPEECH_MS", "450"))  # 最短语音
-VAD_MIN_SILENCE_MS = int(os.getenv("WS_VAD_MIN_SILENCE_MS", "1600"))# 最短静音=句结束
+VAD_MIN_SILENCE_MS = int(
+    os.getenv("WS_VAD_MIN_SILENCE_MS", "1600"))  # 最短静音=句结束
 VAD_CHUNK_MS = int(os.getenv("WS_VAD_CHUNK_MS", "100"))            # 检测粒度
 MIN_UTTERANCE_MS = int(os.getenv("WS_MIN_UTTERANCE_MS", "900"))
 MIN_AUDIO_RMS = float(os.getenv("WS_MIN_AUDIO_RMS", "0.012"))
 
 # ── ASR 参数 ─────────────────────────────────────────
 ASR_TRAILING_SILENCE_MS = int(os.getenv("WS_ASR_TRAILING_SILENCE_MS", "1800"))
-ASR_MAX_SENTENCE_SILENCE_MS = int(os.getenv("WS_ASR_MAX_SENTENCE_SILENCE_MS", "1800"))
-ASR_CALLBACK_FRAME_BYTES = int(os.getenv("WS_ASR_CALLBACK_FRAME_BYTES", "6400"))
-ASR_CALLBACK_FIRST_TIMEOUT_S = float(os.getenv("WS_ASR_CALLBACK_FIRST_TIMEOUT_S", "8.0"))
+ASR_MAX_SENTENCE_SILENCE_MS = int(
+    os.getenv("WS_ASR_MAX_SENTENCE_SILENCE_MS", "1800"))
+ASR_CALLBACK_FRAME_BYTES = int(
+    os.getenv("WS_ASR_CALLBACK_FRAME_BYTES", "6400"))
+ASR_CALLBACK_FIRST_TIMEOUT_S = float(
+    os.getenv("WS_ASR_CALLBACK_FIRST_TIMEOUT_S", "8.0"))
 ASR_CALLBACK_GRACE_S = float(os.getenv("WS_ASR_CALLBACK_GRACE_S", "1.2"))
 
 
@@ -218,8 +230,68 @@ def split_pcm_chunks(pcm_bytes: bytes, chunk_duration_ms: int = 100, sample_rate
     chunk_bytes = chunk_samples * BYTES_PER_FRAME
     chunks = []
     for i in range(0, len(pcm_bytes), chunk_bytes):
-        chunks.append(pcm_bytes[i : i + chunk_bytes])
+        chunks.append(pcm_bytes[i: i + chunk_bytes])
     return chunks
+
+
+def _coerce_sample_rate(value: Any, default: int = SAMPLE_RATE_IN) -> int:
+    try:
+        sample_rate = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    return sample_rate if 8000 <= sample_rate <= 96000 else default
+
+
+def _pcm_duration_ms(pcm_bytes: bytes, sample_rate: int) -> float:
+    if sample_rate <= 0:
+        return 0.0
+    return len(pcm_bytes) / BYTES_PER_FRAME / sample_rate * 1000
+
+
+def _pcm_rms(pcm_bytes: bytes) -> float:
+    if len(pcm_bytes) < BYTES_PER_FRAME:
+        return 0.0
+    try:
+        return audioop.rms(pcm_bytes, SAMPLE_WIDTH) / 32768.0
+    except audioop.error:
+        return 0.0
+
+
+def _resample_pcm(pcm_bytes: bytes, from_rate: int, to_rate: int = ASR_SAMPLE_RATE) -> bytes:
+    if not pcm_bytes or from_rate == to_rate:
+        return pcm_bytes
+    converted, _ = audioop.ratecv(
+        pcm_bytes, SAMPLE_WIDTH, CHANNELS, from_rate, to_rate, None)
+    return converted
+
+
+def _is_probable_asr_hallucination(text: str, duration_ms: float, rms: float) -> bool:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if not cleaned:
+        return True
+    compact = re.sub(r"[\s。！？.!?,，、…]+", "", cleaned).lower()
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", cleaned))
+    latin_words = re.findall(r"[a-zA-Z]+", cleaned)
+    known_noise = {
+        "merci",
+        "oh",
+        "wow",
+        "the",
+        "huh",
+        "um",
+        "uh",
+        "嗯",
+        "啊",
+    }
+    if compact in known_noise and duration_ms < 1800:
+        return True
+    if "sous titrage" in cleaned.lower():
+        return True
+    if cjk_count == 0 and len(latin_words) <= 3 and duration_ms < 2500:
+        return True
+    if duration_ms < MIN_UTTERANCE_MS or rms < MIN_AUDIO_RMS:
+        return True
+    return False
 
 
 # ═══════════════════════════════════════════════════════
@@ -258,12 +330,13 @@ class _StreamAsrCallback(RecognitionCallback):
 
     def prompt(self) -> str:
         if self.sentences:
-            ordered = sorted(self.sentences, key=lambda s: s.get("sentence_id") or 0)
+            ordered = sorted(
+                self.sentences, key=lambda s: s.get("sentence_id") or 0)
             return " ".join(s.get("text", "") for s in ordered).strip()
         return self.latest_text.strip()
 
 
-async def _recognize_pcm_streaming(pcm_bytes: bytes, sample_rate: int = SAMPLE_RATE_IN) -> str:
+async def _recognize_pcm_streaming(pcm_bytes: bytes, sample_rate: int = ASR_SAMPLE_RATE) -> str:
     """将 PCM 字节流传入 DashScope ASR callback，返回识别文本。"""
     loop = asyncio.get_running_loop()
 
@@ -279,7 +352,7 @@ async def _recognize_pcm_streaming(pcm_bytes: bytes, sample_rate: int = SAMPLE_R
     await loop.run_in_executor(
         None,
         lambda: recognition.start(
-            max_sentence_silence=800,
+            max_sentence_silence=ASR_MAX_SENTENCE_SILENCE_MS,
             semantic_punctuation_enabled=False,
             multi_threshold_mode_enabled=True,
         ),
@@ -288,13 +361,14 @@ async def _recognize_pcm_streaming(pcm_bytes: bytes, sample_rate: int = SAMPLE_R
     # 分帧发送音频数据
     def _send_frames():
         for i in range(0, len(pcm_bytes), ASR_CALLBACK_FRAME_BYTES):
-            frame = pcm_bytes[i : i + ASR_CALLBACK_FRAME_BYTES]
+            frame = pcm_bytes[i: i + ASR_CALLBACK_FRAME_BYTES]
             recognition.send_audio_frame(frame)
 
     await loop.run_in_executor(None, _send_frames)
 
     # 追加尾静音（帮助 ASR 判定句子结束）
-    trailing_bytes = b"\x00" * (int(SAMPLE_RATE_IN * ASR_TRAILING_SILENCE_MS / 1000) * BYTES_PER_FRAME)
+    trailing_bytes = b"\x00" * \
+        (int(sample_rate * ASR_TRAILING_SILENCE_MS / 1000) * BYTES_PER_FRAME)
     recognition.send_audio_frame(trailing_bytes)
 
     # 停止识别
@@ -325,12 +399,14 @@ async def _recognize_pcm_streaming(pcm_bytes: bytes, sample_rate: int = SAMPLE_R
 class VoiceSession:
     """管理一个 WebSocket 语音会话的完整状态。"""
 
-    def __init__(self, session_id: str):
+    def __init__(self, session_id: str, sample_rate: int = SAMPLE_RATE_IN):
         self.session_id = session_id
+        self.sample_rate = _coerce_sample_rate(sample_rate)
         self.config: dict[str, str] = {}
-        self.vad = SimpleVAD()
+        self.vad = SimpleVAD(sample_rate=self.sample_rate)
         self.history: list[dict] = []
         self._interrupted = False
+        self.processing_lock = asyncio.Lock()
 
     @property
     def interrupted(self) -> bool:
@@ -347,6 +423,17 @@ class VoiceSession:
 # ═══════════════════════════════════════════════════════
 #  核心：处理一句话的完整流水线（委托给 run_customer_turn）
 # ═══════════════════════════════════════════════════════
+
+async def _process_utterance_safe(
+    session: VoiceSession,
+    pcm_bytes: bytes,
+    ws_send_json,
+    ws_send_bytes,
+) -> None:
+    """带 processing lock 的 utterance 处理入口，防止并发推进 state。"""
+    async with session.processing_lock:
+        await _process_utterance(session, pcm_bytes, ws_send_json, ws_send_bytes)
+
 
 async def _process_utterance(
     session: VoiceSession,
@@ -374,10 +461,39 @@ async def _process_utterance(
     t0 = time.perf_counter()
 
     # ── Step 1: ASR ──
-    user_text = await _recognize_pcm_streaming(pcm_bytes)
+    input_sample_rate = session.sample_rate
+    audio_duration_ms = _pcm_duration_ms(pcm_bytes, input_sample_rate)
+    audio_rms = _pcm_rms(pcm_bytes)
+    if audio_duration_ms < MIN_UTTERANCE_MS or audio_rms < MIN_AUDIO_RMS:
+        set_status(
+            "ws_audio_ignored",
+            audio_duration_ms=round(audio_duration_ms, 1),
+            audio_rms=round(audio_rms, 5),
+            sample_rate=input_sample_rate,
+        )
+        await ws_send_json({"type": "status", "stage": "listening", "detail": "未识别到有效语音"})
+        return
+
+    try:
+        asr_pcm = _resample_pcm(pcm_bytes, input_sample_rate, ASR_SAMPLE_RATE)
+    except audioop.error as exc:
+        set_status("ws_resample_error", error=str(
+            exc), sample_rate=input_sample_rate)
+        await ws_send_json({"type": "status", "stage": "listening", "detail": "音频格式异常，请再说一遍"})
+        return
+
+    user_text = await _recognize_pcm_streaming(asr_pcm, sample_rate=ASR_SAMPLE_RATE)
     asr_time = time.perf_counter() - t0
 
-    if not user_text:
+    if not user_text or _is_probable_asr_hallucination(user_text, audio_duration_ms, audio_rms):
+        set_status(
+            "ws_asr_ignored",
+            prompt=user_text,
+            audio_duration_ms=round(audio_duration_ms, 1),
+            audio_rms=round(audio_rms, 5),
+            input_sample_rate=input_sample_rate,
+            asr_sample_rate=ASR_SAMPLE_RATE,
+        )
         await ws_send_json({"type": "status", "stage": "listening", "detail": "未识别到语音"})
         return
 
@@ -435,7 +551,8 @@ async def _process_utterance(
     # ── Step 4: TTS 音频分块下发 ──
     audio_bytes = turn.get("audio_bytes", b"")
     if audio_bytes:
-        audio_chunks = split_pcm_chunks(audio_bytes, chunk_duration_ms=100, sample_rate=SAMPLE_RATE_OUT)
+        audio_chunks = split_pcm_chunks(
+            audio_bytes, chunk_duration_ms=100, sample_rate=SAMPLE_RATE_OUT)
         for chunk in audio_chunks:
             if session.interrupted:
                 session.clear_interrupt()
@@ -446,7 +563,8 @@ async def _process_utterance(
     await ws_send_json({"type": "tts_done"})
 
     # ── Step 5: 下发每轮评估信息 ──
-    is_terminal = training.get("training_complete") or training.get("final_state")
+    is_terminal = training.get(
+        "training_complete") or training.get("final_state")
     is_success = training.get("is_success")
     is_failure = training.get("is_failure")
 
@@ -461,7 +579,8 @@ async def _process_utterance(
     })
 
     # 记录本轮
-    session.history.append({"user_text": user_text, "assistant_text": response_text})
+    session.history.append(
+        {"user_text": user_text, "assistant_text": response_text})
 
     total_time = time.perf_counter() - t0
     set_status(
@@ -475,22 +594,29 @@ async def _process_utterance(
         terminal=bool(is_terminal),
     )
 
-    # ── Step 6: 获取评分详情（如果 run_customer_turn 触发了评估） ──
-    from .fastrtc_new_web import LAST_STATUS as _FW_LAST
-    eval_data = _FW_LAST.get("evaluation") if isinstance(_FW_LAST.get("evaluation"), dict) else None
-    if eval_data:
-        await ws_send_json({
-            "type": "final_evaluation",
-            "score": eval_data.get("total_score"),
-            "dimensions": [
-                {"name": d.get("dimension"), "score": d.get("score"), "max": d.get("max_score")}
-                for d in eval_data.get("dimension_scores", [])
-            ],
-            "strengths": eval_data.get("strengths", []),
-            "improvements": eval_data.get("improvements", []),
-            "summary": eval_data.get("summary", ""),
-            "source": eval_data.get("source", "heuristic"),
-        })
+    # ── Step 6: 获取评分详情（仅终局，轮询后台评估线程） ──
+    if is_terminal:
+        eval_data = None
+        for _ in range(50):  # 最多等 5 秒（评估线程与 TTS 并行，通常已就绪）
+            last = dict(WEB_LAST_STATUS)
+            if last.get("stage") == "evaluation_done" and isinstance(last.get("evaluation"), dict):
+                eval_data = last["evaluation"]
+                break
+            await asyncio.sleep(0.1)
+        if eval_data:
+            await ws_send_json({
+                "type": "final_evaluation",
+                "score": eval_data.get("total_score"),
+                "dimensions": [
+                    {"name": d.get("dimension"), "score": d.get(
+                        "score"), "max": d.get("max_score")}
+                    for d in eval_data.get("dimension_scores", [])
+                ],
+                "strengths": eval_data.get("strengths", []),
+                "improvements": eval_data.get("improvements", []),
+                "summary": eval_data.get("summary", ""),
+                "source": eval_data.get("source", "heuristic"),
+            })
 
     # 如果到达终局，通知客户端
     if is_terminal:
@@ -511,6 +637,52 @@ async def _process_utterance(
             "asr": round(asr_time, 2),
             "pipeline": round(pipeline_time - asr_time, 2),
         },
+    })
+
+
+# ═══════════════════════════════════════════════════════
+#  Session 启动：下发 persona + goal
+# ═══════════════════════════════════════════════════════
+
+async def _send_persona_and_goal(session: VoiceSession, ws_send_json) -> None:
+    """在 session 启动后，下发客户画像和训练目标到 H5 客户端。"""
+    stage_id = session.config.get("stage_id", "cold_call")
+    difficulty_id = session.config.get("difficulty_id", "easy")
+    try:
+        _, summary, context = _build_session_training_prompt(
+            session.session_id, stage_id, difficulty_id,
+        )
+        case = get_case(context.get("case_id")) if context.get(
+            "case_id") else None
+        assets = summarize_case_assets(case) if case else {}
+        stages = load_stages()
+        stage = stages.get(stage_id, {}) if stages else {}
+    except Exception as exc:
+        print(f"[voice-ws] persona/goal build failed: {exc}")
+        return
+
+    await ws_send_json({
+        "type": "persona",
+        "name": assets.get("customer_name") or summary.get("customer", "客户"),
+        "role": assets.get("customer_role", ""),
+        "location": assets.get("customer_location", ""),
+        "personality": assets.get("personality", ""),
+        "style": assets.get("communication_style", ""),
+        "concerns": assets.get("main_concerns", []),
+        "price_sensitivity": assets.get("price_sensitivity"),
+        "trust_start": assets.get("trust_start"),
+        "scene": assets.get("scene") or "",
+        "stage_label": summary.get("stage", ""),
+        "difficulty_label": summary.get("difficulty", ""),
+        "case_count": context.get("candidate_count", 0),
+    })
+
+    await ws_send_json({
+        "type": "goal",
+        "goal": stage.get("training_goal", ""),
+        "must_do": assets.get("must_do", []),
+        "critical": assets.get("critical_mistakes", []),
+        "current_status": assets.get("current_status") or "",
     })
 
 
@@ -555,7 +727,8 @@ async def handle_audio_probe(ws):
                 # 每收到 800ms 的 PCM，回一个确认音
                 threshold_bytes = int(SAMPLE_RATE_IN * 0.8) * BYTES_PER_FRAME
                 if pcm_total >= threshold_bytes:
-                    tone = generate_sine_wave(freq=440, duration_s=0.15, sample_rate=SAMPLE_RATE_IN, amplitude=0.15)
+                    tone = generate_sine_wave(
+                        freq=440, duration_s=0.15, sample_rate=SAMPLE_RATE_IN, amplitude=0.15)
                     await ws.send_bytes(tone)
                     pcm_total = 0
                     await ws.send_json({"type": "ack", "pcm_received_bytes": pcm_total})
@@ -652,10 +825,20 @@ async def handle_voice_ws(ws):
 
                 if "speech_end" in events and not session.interrupted:
                     pcm = session.vad.extract_speech()
-                    if len(pcm) > SAMPLE_RATE_IN * 0.3 * BYTES_PER_FRAME:  # > 300ms
+                    min_bytes = int(session.sample_rate *
+                                    MIN_UTTERANCE_MS / 1000) * BYTES_PER_FRAME
+                    if len(pcm) >= min_bytes:
                         await _send_json({"type": "status", "stage": "processing", "detail": "正在识别"})
                         asyncio.create_task(
-                            _process_utterance(session, pcm, _send_json, _send_bytes)
+                            _process_utterance_safe(
+                                session, pcm, _send_json, _send_bytes)
+                        )
+                    else:
+                        set_status(
+                            "ws_audio_too_short",
+                            audio_duration_ms=round(
+                                _pcm_duration_ms(pcm, session.sample_rate), 1),
+                            sample_rate=session.sample_rate,
                         )
 
             elif isinstance(msg, str):
@@ -669,14 +852,23 @@ async def handle_voice_ws(ws):
 
                 if msg_type == "control":
                     if action == "start":
-                        sid = data.get("session_id") or f"ws-{int(time.time() * 1000)}"
-                        session = VoiceSession(sid)
-                        session.config = data.get("config", {})
+                        sid = data.get(
+                            "session_id") or f"ws-{int(time.time() * 1000)}"
+                        config = data.get("config", {}) if isinstance(
+                            data.get("config"), dict) else {}
+                        sample_rate = _coerce_sample_rate(config.get(
+                            "sample_rate") or data.get("sample_rate"))
+                        session = VoiceSession(sid, sample_rate=sample_rate)
+                        session.config = config
                         await _send_json({
                             "type": "status",
                             "stage": "listening",
                             "session_id": session.session_id,
+                            "sample_rate": session.sample_rate,
                         })
+                        # 后台下发客户画像 + 训练目标
+                        asyncio.create_task(
+                            _send_persona_and_goal(session, _send_json))
 
                     elif action == "pause":
                         if session:
