@@ -17,10 +17,12 @@ VAD:
 from __future__ import annotations
 
 import asyncio
+import audioop
 import io
 import json
 import math
 import os
+import re
 import struct
 import time
 import wave
@@ -28,9 +30,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .fastrtc_new_web import run_customer_turn, set_status
+    from .fastrtc_new_web import LAST_STATUS as WEB_LAST_STATUS, run_customer_turn, set_status
 except ImportError:
-    from fastrtc_new_web import run_customer_turn, set_status
+    from fastrtc_new_web import LAST_STATUS as WEB_LAST_STATUS, run_customer_turn, set_status
 
 import dashscope
 from dashscope import Generation
@@ -40,22 +42,26 @@ dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
 
 # ── 常量 ────────────────────────────────────────────
 SAMPLE_RATE_IN = int(os.getenv("WS_VOICE_SAMPLE_RATE_IN", "16000"))
+ASR_SAMPLE_RATE = int(os.getenv("WS_ASR_SAMPLE_RATE", "16000"))
 SAMPLE_RATE_OUT = 24000  # TTS 输出采样率（cosyvoice PCM）
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit
 BYTES_PER_FRAME = SAMPLE_WIDTH * CHANNELS
 
 # ── VAD 参数（能量检测） ─────────────────────────────
-VAD_THRESHOLD = float(os.getenv("WS_VAD_THRESHOLD", "0.01"))       # RMS 阈值
-VAD_MIN_SPEECH_MS = int(os.getenv("WS_VAD_MIN_SPEECH_MS", "200"))  # 最短语音
-VAD_MIN_SILENCE_MS = int(os.getenv("WS_VAD_MIN_SILENCE_MS", "800"))# 最短静音=句结束
+VAD_THRESHOLD = float(os.getenv("WS_VAD_THRESHOLD", "0.018"))       # RMS 阈值
+VAD_MIN_SPEECH_MS = int(os.getenv("WS_VAD_MIN_SPEECH_MS", "450"))  # 最短语音
+VAD_MIN_SILENCE_MS = int(os.getenv("WS_VAD_MIN_SILENCE_MS", "1600"))# 最短静音=句结束
 VAD_CHUNK_MS = int(os.getenv("WS_VAD_CHUNK_MS", "100"))            # 检测粒度
+MIN_UTTERANCE_MS = int(os.getenv("WS_MIN_UTTERANCE_MS", "900"))
+MIN_AUDIO_RMS = float(os.getenv("WS_MIN_AUDIO_RMS", "0.012"))
 
 # ── ASR 参数 ─────────────────────────────────────────
-ASR_TRAILING_SILENCE_MS = int(os.getenv("WS_ASR_TRAILING_SILENCE_MS", "600"))
+ASR_TRAILING_SILENCE_MS = int(os.getenv("WS_ASR_TRAILING_SILENCE_MS", "1800"))
+ASR_MAX_SENTENCE_SILENCE_MS = int(os.getenv("WS_ASR_MAX_SENTENCE_SILENCE_MS", "1800"))
 ASR_CALLBACK_FRAME_BYTES = int(os.getenv("WS_ASR_CALLBACK_FRAME_BYTES", "6400"))
-ASR_CALLBACK_FIRST_TIMEOUT_S = float(os.getenv("WS_ASR_CALLBACK_FIRST_TIMEOUT_S", "5.0"))
-ASR_CALLBACK_GRACE_S = float(os.getenv("WS_ASR_CALLBACK_GRACE_S", "0.6"))
+ASR_CALLBACK_FIRST_TIMEOUT_S = float(os.getenv("WS_ASR_CALLBACK_FIRST_TIMEOUT_S", "8.0"))
+ASR_CALLBACK_GRACE_S = float(os.getenv("WS_ASR_CALLBACK_GRACE_S", "1.2"))
 
 
 # ═══════════════════════════════════════════════════════
