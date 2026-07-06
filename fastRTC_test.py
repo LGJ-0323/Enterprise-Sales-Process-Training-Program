@@ -118,7 +118,7 @@ def main():
         # 2. LLM 生成回复
         try:
             response = dashscope_client.chat.completions.create(
-                model="qwen-turbo-latest",
+                model="qwen3.6-plus",
                 messages=[
                     {"role": "system", "content": "你是一个语音助手，请始终使用中文回复，语气自然、简洁。"},
                     {"role": "user", "content": prompt}

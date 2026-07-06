@@ -160,7 +160,7 @@ data/
 ```text
 DASHSCOPE_API_KEY=
 DASHSCOPE_ASR_MODEL=paraformer-realtime-v2
-DASHSCOPE_LLM_MODEL=qwen-turbo
+DASHSCOPE_LLM_MODEL=qwen3.6-plus
 DASHSCOPE_TTS_MODEL=cosyvoice-v1
 DASHSCOPE_TTS_VOICE=longxiaochun
 

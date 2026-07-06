@@ -1,3 +1,18 @@
+"""
+conversation_store.py — SQLite 会话持久化层
+
+职责：
+1. 管理 conversation_sessions 表：记录每次训练的会话元信息（阶段、难度、音色、状态等）
+2. 管理 conversation_turns 表：记录每轮对话的输入/输出文本和元数据
+3. 管理 conversation_memory 表：记录每轮结束后的会话记忆快照
+
+核心流程：
+- save_turn():        每轮对话结束后调用，写入轮次记录并更新会话记忆
+- get_recent_memory(): 获取最近 N 轮对话文本，注入下一轮 prompt
+- ensure_session():   首次对话时创建会话记录，后续对话更新状态
+- save_session_evaluation(): 训练结束后写入评分结果
+"""
+
 from __future__ import annotations
 
 import json
@@ -10,14 +25,16 @@ from typing import Any
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_DIR / "data" / "training_memory.sqlite3"
-DB_PATH = Path(os.getenv("TRAINING_DB_PATH", DEFAULT_DB_PATH))
+DB_PATH = Path(os.getenv("TRAINING_DB_PATH") or DEFAULT_DB_PATH)
 
 
 def utc_now() -> str:
+    """返回当前 UTC 时间的 ISO 格式字符串（秒精度，带 Z 后缀）。"""
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
 def connect() -> sqlite3.Connection:
+    """创建 SQLite 数据库连接，启用 WAL 模式和外键约束。"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
@@ -27,6 +44,15 @@ def connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    """初始化数据库表结构（首次运行时自动创建，后续运行幂等）。
+
+    创建三张表：
+    - conversation_sessions: 会话主表
+    - conversation_turns:    对话轮次表
+    - conversation_memory:   会话记忆快照表
+
+    同时通过 _ensure_columns 做增量列迁移（向后兼容旧版本数据库）。
+    """
     with connect() as conn:
         conn.executescript(
             """
@@ -84,6 +110,7 @@ def init_db() -> None:
                 ON conversation_memory(session_id, turn_index);
             """
         )
+        # 增量列迁移：兼容旧版本数据库，自动添加新增列
         _ensure_columns(
             conn,
             "conversation_sessions",
@@ -100,6 +127,10 @@ def init_db() -> None:
 
 
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    """增量列迁移：检查表中是否缺少指定列，缺少则自动 ALTER TABLE 添加。
+
+    用于向后兼容旧版本数据库，避免重建表丢失数据。
+    """
     existing = {
         str(row["name"])
         for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -110,6 +141,11 @@ def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str
 
 
 def ensure_session(session_id: str, training: dict[str, Any]) -> None:
+    """创建或更新会话记录（UPSERT）。
+
+    首次对话时 INSERT 新会话，后续对话 UPDATE 状态字段。
+    当 training 中 training_complete=True 时标记会话完成。
+    """
     now = utc_now()
     is_complete = int(bool(training.get("training_complete")))
     completed_at = now if is_complete else training.get("completed_at")
@@ -156,6 +192,14 @@ def ensure_session(session_id: str, training: dict[str, Any]) -> None:
 
 
 def get_recent_memory(session_id: str, limit: int = 10) -> str:
+    """获取指定会话最近 N 轮的对话文本，用于注入下一轮 prompt 作为上下文记忆。
+
+    返回格式：
+        第1轮 员工：xxx
+        第1轮 客户：xxx
+        第2轮 员工：xxx
+        第2轮 客户：xxx
+    """
     init_db()
     with connect() as conn:
         rows = conn.execute(
@@ -180,6 +224,7 @@ def get_recent_memory(session_id: str, limit: int = 10) -> str:
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    """将 sqlite3.Row 转为 dict，并自动解析 metadata_json 和 evaluation_json 字段。"""
     if row is None:
         return None
     data = dict(row)
@@ -199,6 +244,7 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 
 def get_session(session_id: str) -> dict[str, Any] | None:
+    """根据 session_id 查询完整会话信息（含评分结果）。"""
     init_db()
     with connect() as conn:
         row = conn.execute(
@@ -213,6 +259,7 @@ def get_session(session_id: str) -> dict[str, Any] | None:
 
 
 def get_session_turns(session_id: str) -> list[dict[str, Any]]:
+    """获取指定会话的所有对话轮次（按 turn_index 升序排列）。"""
     init_db()
     with connect() as conn:
         rows = conn.execute(
@@ -234,6 +281,17 @@ def save_turn(
     training: dict[str, Any],
     metadata: dict[str, Any] | None = None,
 ) -> tuple[int, int]:
+    """保存一轮对话记录，并更新会话记忆。
+
+    执行流程：
+    1. ensure_session() 确保会话记录存在
+    2. 插入 conversation_turns 记录（含用户输入、客户回复、元数据）
+    3. 更新会话的 turn_count 和 memory_text
+    4. 插入 conversation_memory 快照记录
+
+    Returns:
+        (turn_id, turn_index): 新轮次的数据库 ID 和轮次序号
+    """
     init_db()
     ensure_session(session_id, training)
     now = utc_now()
@@ -279,6 +337,7 @@ def save_turn(
             (now, turn_index, session_id),
         )
 
+    # 更新会话记忆快照
     memory_text = get_recent_memory(session_id)
     with connect() as conn:
         conn.execute(
@@ -303,6 +362,7 @@ def save_turn(
 
 
 def update_turn_audio_bytes(turn_id: int, audio_bytes: int) -> None:
+    """更新轮次记录的音频字节数（TTS 合成完成后调用）。"""
     init_db()
     with connect() as conn:
         conn.execute(
@@ -312,6 +372,7 @@ def update_turn_audio_bytes(turn_id: int, audio_bytes: int) -> None:
 
 
 def save_session_evaluation(session_id: str, evaluation: dict[str, Any]) -> None:
+    """保存训练会话的评分结果（训练完成后由 evaluator 调用）。"""
     init_db()
     now = utc_now()
     with connect() as conn:
@@ -326,6 +387,7 @@ def save_session_evaluation(session_id: str, evaluation: dict[str, Any]) -> None
 
 
 def recent_completed_sessions(limit: int = 3) -> list[dict[str, Any]]:
+    """获取最近完成的 N 个训练会话（用于首页展示历史训练记录）。"""
     init_db()
     with connect() as conn:
         rows = conn.execute(
@@ -341,4 +403,5 @@ def recent_completed_sessions(limit: int = 3) -> list[dict[str, Any]]:
     return [_row_to_dict(row) or {} for row in rows]
 
 
+# 模块加载时自动初始化数据库
 init_db()

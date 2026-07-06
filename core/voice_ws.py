@@ -28,35 +28,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .conversation_store import get_recent_memory, save_turn
-    from .fastrtc_new_web import (
-        _build_session_training_prompt,
-        build_customer_guardrail_reply,
-        build_role_guard_prompt,
-        clean_customer_reply,
-        is_hostile_or_confused_user_text,
-        is_role_reversed_sales_reply,
-        load_customer_profile,
-        parse_customer_payload,
-        sanitize_recent_memory,
-        set_status,
-        synthesize_with_retry,
-    )
+    from .fastrtc_new_web import run_customer_turn, set_status
 except ImportError:
-    from conversation_store import get_recent_memory, save_turn
-    from fastrtc_new_web import (
-        _build_session_training_prompt,
-        build_customer_guardrail_reply,
-        build_role_guard_prompt,
-        clean_customer_reply,
-        is_hostile_or_confused_user_text,
-        is_role_reversed_sales_reply,
-        load_customer_profile,
-        parse_customer_payload,
-        sanitize_recent_memory,
-        set_status,
-        synthesize_with_retry,
-    )
+    from fastrtc_new_web import run_customer_turn, set_status
 
 import dashscope
 from dashscope import Generation
@@ -339,56 +313,6 @@ async def _recognize_pcm_streaming(pcm_bytes: bytes, sample_rate: int = SAMPLE_R
 
 
 # ═══════════════════════════════════════════════════════
-#  LLM 流式生成
-# ═══════════════════════════════════════════════════════
-
-def _split_sentences(text: str) -> list[str]:
-    """按中文标点切句，保留标点在句尾。"""
-    import re
-
-    parts = re.split(r"(?<=[。！？；\n])", text)
-    result = []
-    for part in parts:
-        part = part.strip()
-        if part:
-            result.append(part)
-    return result
-
-
-async def _llm_stream(
-    system_prompt: str,
-    user_prompt: str,
-    model: str | None = None,
-) -> str:
-    """流式调用 Qwen，收集完整回复文本。"""
-    loop = asyncio.get_running_loop()
-
-    def _call():
-        resp = Generation.call(
-            model=model or os.getenv("DASHSCOPE_LLM_MODEL", "qwen-turbo"),
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            result_format="message",
-            stream=True,
-            incremental_output=True,
-        )
-        result_text = ""
-        for chunk in resp:
-            if chunk.status_code == 200:
-                try:
-                    delta = chunk.output.choices[0].message.content
-                    if delta:
-                        result_text += delta
-                except (AttributeError, IndexError):
-                    pass
-        return result_text
-
-    return await loop.run_in_executor(None, _call)
-
-
-# ═══════════════════════════════════════════════════════
 #  语音会话管理
 # ═══════════════════════════════════════════════════════
 
@@ -400,9 +324,7 @@ class VoiceSession:
         self.config: dict[str, str] = {}
         self.vad = SimpleVAD()
         self.history: list[dict] = []
-        self.tts_pending: asyncio.Queue[bytes] = asyncio.Queue()
         self._interrupted = False
-        self._tts_task: asyncio.Task | None = None
 
     @property
     def interrupted(self) -> bool:
@@ -411,19 +333,13 @@ class VoiceSession:
     def interrupt(self) -> None:
         """打断当前 TTS 播放。"""
         self._interrupted = True
-        # 清空播放队列
-        while not self.tts_pending.empty():
-            try:
-                self.tts_pending.get_nowait()
-            except asyncio.QueueEmpty:
-                break
 
     def clear_interrupt(self) -> None:
         self._interrupted = False
 
 
 # ═══════════════════════════════════════════════════════
-#  主线：处理一句话的完整流水线
+#  核心：处理一句话的完整流水线（委托给 run_customer_turn）
 # ═══════════════════════════════════════════════════════
 
 async def _process_utterance(
@@ -432,126 +348,113 @@ async def _process_utterance(
     ws_send_json,
     ws_send_bytes,
 ) -> None:
-    """ASR → LLM → TTS → WebSocket 流式下发。"""
+    """ASR → run_customer_turn（完整训练语义）→ WebSocket 流式下发。
+
+    run_customer_turn 包含:
+      · _build_session_training_prompt → case + state machine 注入
+      · build_customer_quality_prompt  → 防复读 + 客户智能要求
+      · qwen3.6-plus + hyperparameters
+      · clean_customer_reply + refine_customer_reply
+      · parse_customer_payload → advance_session_state
+      · save_turn + _maybe_evaluate_completed_session
+      · TTS (synthesize_with_retry)
+
+    本函数只负责:
+      · ASR 识别 PCM → 文本
+      · 把文本丢给 run_customer_turn（线程池中同步执行）
+      · 把返回的 TTS 音频分块下发 WebSocket
+      · 转发 status/response_text/evaluation 等消息
+    """
     t0 = time.perf_counter()
-    stage_id = session.config.get("stage_id", "cold_call")
-    difficulty_id = session.config.get("difficulty_id", "easy")
-    voice_id = session.config.get("voice_id", "longsanshu_v3")
 
     # ── Step 1: ASR ──
     user_text = await _recognize_pcm_streaming(pcm_bytes)
     asr_time = time.perf_counter() - t0
 
     if not user_text:
-        await ws_send_json({
-            "type": "status",
-            "stage": "listening",
-            "detail": "未识别到语音",
-        })
+        await ws_send_json({"type": "status", "stage": "listening", "detail": "未识别到语音"})
         return
 
     await ws_send_json({"type": "asr_final", "text": user_text})
     await ws_send_json({"type": "status", "stage": "processing"})
 
-    # ── Step 2: 构建 Prompt ──
+    # ── Step 2: 完整训练管道（线程池中同步执行） ──
+    stage_id = session.config.get("stage_id", "cold_call")
+    difficulty_id = session.config.get("difficulty_id", "easy")
+    voice_id = session.config.get("voice_id", "longsanshu_v3")
+    avatar_id = session.config.get("avatar_id", "auto")
+
+    loop = asyncio.get_running_loop()
     try:
-        training_prompt, training_summary, session_context = _build_session_training_prompt(
-            session.session_id, stage_id, difficulty_id
+        turn = await loop.run_in_executor(
+            None,
+            lambda: run_customer_turn(
+                prompt=user_text,
+                stage_id=stage_id,
+                difficulty_id=difficulty_id,
+                voice_id=voice_id,
+                avatar_id=avatar_id,
+                session_id=session.session_id,
+            ),
         )
     except Exception as exc:
-        set_status("prompt_build_error", error=str(exc))
-        training_prompt = load_customer_profile()
-        training_summary = {"customer": "客户", "stage": stage_id, "difficulty": difficulty_id}
+        set_status("pipeline_error", error=str(exc))
+        await ws_send_json({"type": "error", "message": f"训练管道异常: {exc}"})
+        return
 
-    voice_cfg = {}
-    try:
-        from .fastrtc_new_web import resolve_voice, resolve_avatar_for_customer
-    except ImportError:
-        from fastrtc_new_web import resolve_voice, resolve_avatar_for_customer
+    pipeline_time = time.perf_counter() - t0
+    response_text = turn.get("response_text", "")
+    guardrail = turn.get("guardrail", "")
+    training = turn.get("training", {})
+    next_state = turn.get("next_state", "")
 
-    voice_cfg = resolve_voice(voice_id)
-    avatar_cfg = resolve_avatar_for_customer(training_summary.get("customer_id"), "auto")
-
-    st = {
-        **training_summary,
-        "voice_id": voice_id,
-        "voice": voice_cfg.get("label", voice_id),
-        "session_id": session.session_id,
-    }
-
-    # 记忆
-    raw_mem = get_recent_memory(session.session_id, limit=10)
-    mem, _ = sanitize_recent_memory(raw_mem)
-    mem_prompt = f"【会话记忆】\n{mem}" if mem else "【会话记忆】\n暂无历史对话。"
-    guard_prompt = build_role_guard_prompt(training_summary.get("customer"))
-
-    # ── Step 3: LLM ──
-    system_content = (
-        f"{load_customer_profile()}\n\n"
-        f"{training_prompt}\n\n"
-        f"{mem_prompt}\n\n"
-        f"{guard_prompt}"
-    )
-
-    llm_t0 = time.perf_counter()
-    raw_response = await _llm_stream(system_content, user_text)
-    llm_time = time.perf_counter() - llm_t0
-
-    # Guardrails
-    response_text = clean_customer_reply(raw_response, training_summary.get("customer"))
-    if not response_text:
-        response_text = raw_response.strip() or "嗯，您先说说具体想怎么合作？"
-
-    guardrail = ""
-    if is_role_reversed_sales_reply(response_text):
-        response_text = build_customer_guardrail_reply(user_text, st)
-        guardrail = "role_reversed"
-    elif is_hostile_or_confused_user_text(user_text):
-        response_text = build_customer_guardrail_reply(user_text, st)
-        guardrail = "hostile"
-
+    # ── Step 3: 下发文本消息 ──
     await ws_send_json({
         "type": "response_text",
         "text": response_text,
-        "raw_text": raw_response,
         "guardrail": guardrail or None,
+        "next_state": next_state,
     })
 
-    # ── Step 4: TTS ──
-    tts_t0 = time.perf_counter()
-    try:
-        audio_bytes = await asyncio.get_running_loop().run_in_executor(
-            None, synthesize_with_retry, response_text, voice_cfg, 3
-        )
-    except Exception as exc:
-        set_status("tts_error", error=str(exc))
-        await ws_send_json({"type": "error", "message": f"TTS 失败: {exc}"})
-        return
+    # State 变更通知
+    before_state = training.get("previous_state", "")
+    current_state = training.get("current_state", "")
+    if before_state and current_state and before_state != current_state:
+        await ws_send_json({
+            "type": "state_change",
+            "from": before_state,
+            "to": current_state,
+        })
 
-    tts_time = time.perf_counter() - tts_t0
-
-    # 分块下发 TTS 音频（100ms 每块）
-    audio_chunks = split_pcm_chunks(audio_bytes, chunk_duration_ms=100, sample_rate=SAMPLE_RATE_OUT)
-    for chunk in audio_chunks:
-        if session.interrupted:
-            session.clear_interrupt()
-            break
-        await ws_send_bytes(chunk)
-        await asyncio.sleep(0.02)  # 小块发送间隔，防拥塞
+    # ── Step 4: TTS 音频分块下发 ──
+    audio_bytes = turn.get("audio_bytes", b"")
+    if audio_bytes:
+        audio_chunks = split_pcm_chunks(audio_bytes, chunk_duration_ms=100, sample_rate=SAMPLE_RATE_OUT)
+        for chunk in audio_chunks:
+            if session.interrupted:
+                session.clear_interrupt()
+                break
+            await ws_send_bytes(chunk)
+            await asyncio.sleep(0.02)
 
     await ws_send_json({"type": "tts_done"})
 
-    # ── Step 5: 保存本轮 ──
-    try:
-        save_turn(
-            session_id=session.session_id,
-            user_text=user_text,
-            assistant_text=response_text,
-            training=st,
-        )
-    except Exception as exc:
-        set_status("save_error", error=str(exc))
+    # ── Step 5: 下发每轮评估信息 ──
+    is_terminal = training.get("training_complete") or training.get("final_state")
+    is_success = training.get("is_success")
+    is_failure = training.get("is_failure")
 
+    await ws_send_json({
+        "type": "evaluation",
+        "turn_index": training.get("turn_count", len(session.history) + 1),
+        "terminal": bool(is_terminal),
+        "is_success": bool(is_success),
+        "is_failure": bool(is_failure),
+        "current_state": current_state or training.get("current_state", ""),
+        "final_state": training.get("final_state", ""),
+    })
+
+    # 记录本轮
     session.history.append({"user_text": user_text, "assistant_text": response_text})
 
     total_time = time.perf_counter() - t0
@@ -561,15 +464,47 @@ async def _process_utterance(
         response_text=response_text,
         total_s=round(total_time, 2),
         asr_s=round(asr_time, 2),
-        llm_s=round(llm_time, 2),
-        tts_s=round(tts_time, 2),
+        pipeline_s=round(pipeline_time - asr_time, 2),
+        next_state=next_state,
+        terminal=bool(is_terminal),
     )
+
+    # ── Step 6: 获取评分详情（如果 run_customer_turn 触发了评估） ──
+    from .fastrtc_new_web import LAST_STATUS as _FW_LAST
+    eval_data = _FW_LAST.get("evaluation") if isinstance(_FW_LAST.get("evaluation"), dict) else None
+    if eval_data:
+        await ws_send_json({
+            "type": "final_evaluation",
+            "score": eval_data.get("total_score"),
+            "dimensions": [
+                {"name": d.get("dimension"), "score": d.get("score"), "max": d.get("max_score")}
+                for d in eval_data.get("dimension_scores", [])
+            ],
+            "strengths": eval_data.get("strengths", []),
+            "improvements": eval_data.get("improvements", []),
+            "summary": eval_data.get("summary", ""),
+            "source": eval_data.get("source", "heuristic"),
+        })
+
+    # 如果到达终局，通知客户端
+    if is_terminal:
+        result = "成功" if is_success else "失败" if is_failure else "已结束"
+        await ws_send_json({
+            "type": "session_end",
+            "turn_count": len(session.history),
+            "result": result,
+            "final_state": training.get("final_state", ""),
+        })
 
     await ws_send_json({
         "type": "status",
-        "stage": "listening",
-        "detail": "继续说话",
-        "timing": {"total": round(total_time, 2), "asr": round(asr_time, 2), "llm": round(llm_time, 2), "tts": round(tts_time, 2)},
+        "stage": "idle" if is_terminal else "listening",
+        "detail": "会话已结束" if is_terminal else "继续说话",
+        "timing": {
+            "total": round(total_time, 2),
+            "asr": round(asr_time, 2),
+            "pipeline": round(pipeline_time - asr_time, 2),
+        },
     })
 
 
@@ -694,7 +629,7 @@ async def handle_voice_ws(ws):
                     continue  # 还没 start，忽略音频
 
                 # 如果正在播放 TTS 且用户说话 → 打断
-                if session.tts_pending.qsize() > 0 or session.interrupted:
+                if session.interrupted:
                     # 但不要立即打断，先看是不是真的语音
                     pass
 

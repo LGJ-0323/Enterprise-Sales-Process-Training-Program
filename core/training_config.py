@@ -1,5 +1,27 @@
 from __future__ import annotations
 
+"""
+training_config.py — 训练配置加载与 prompt 构建
+
+职责：
+1. 从 YAML 文件加载训练配置（阶段、客户、难度、音色、头像）
+2. 提供 Gradio 选择器所需的 choices 列表
+3. 构建训练 prompt（V1 YAML 方式 + V2 JSONL 案例方式）
+
+配置目录结构：
+  core/training/
+    stages/        — 训练阶段（陌call、回访、深入回访、逼单）
+    customers/     — 客户画像（姓名、职位、性格、痛点等）
+    difficulties/  — 难度等级（卡点策略）
+    voices/        — 音色配置（DashScope TTS voice）
+    avatars/       — 头像/人物形象配置
+
+prompt 构建链路：
+  V2（优先）: case_loader → prompt_assembler → training_data_context → 完整 prompt
+  V1（fallback）: YAML 配置 → 硬编码 prompt 模板
+"""
+
+
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -12,6 +34,7 @@ TRAINING_DIR = BASE_DIR / "training"
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
+    """读取 YAML 文件并返回 dict，校验必须为对象类型。"""
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError(f"{path} must contain a YAML object.")
@@ -20,6 +43,7 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 @lru_cache
 def _load_items(group: str) -> dict[str, dict[str, Any]]:
+    """通用配置加载器：从指定子目录加载所有 YAML 文件，按 id 索引。"""
     items: dict[str, dict[str, Any]] = {}
     for path in sorted((TRAINING_DIR / group).glob("*.yaml")):
         data = _read_yaml(path)
@@ -31,6 +55,7 @@ def _load_items(group: str) -> dict[str, dict[str, Any]]:
 
 @lru_cache
 def load_voices() -> dict[str, dict[str, Any]]:
+    """加载音色配置。支持单文件多音色（voices 列表）和单文件单音色两种格式。"""
     voices: dict[str, dict[str, Any]] = {}
     for path in sorted((TRAINING_DIR / "voices").glob("*.yaml")):
         data = _read_yaml(path)
@@ -46,6 +71,7 @@ def load_voices() -> dict[str, dict[str, Any]]:
 
 @lru_cache
 def load_avatars() -> dict[str, dict[str, Any]]:
+    """加载头像/人物形象配置。支持单文件多头像（avatars 列表）和单文件单头像两种格式。"""
     avatars: dict[str, dict[str, Any]] = {}
     for path in sorted((TRAINING_DIR / "avatars").glob("*.yaml")):
         data = _read_yaml(path)
@@ -60,33 +86,40 @@ def load_avatars() -> dict[str, dict[str, Any]]:
 
 
 def load_stages() -> dict[str, dict[str, Any]]:
+    """加载训练阶段配置（cold_call, follow_up, deep_follow_up, closing）。"""
     return _load_items("stages")
 
 
 def load_customers() -> dict[str, dict[str, Any]]:
+    """加载客户画像配置。"""
     return _load_items("customers")
 
 
 def load_difficulties() -> dict[str, dict[str, Any]]:
+    """加载难度等级配置（easy, normal, hard, expert）。"""
     return _load_items("difficulties")
 
 
 def _get_or_first(items: dict[str, dict[str, Any]], item_id: str | None) -> dict[str, Any]:
+    """按 ID 获取配置项，找不到则返回第一个（兜底）。"""
     if item_id and item_id in items:
         return items[item_id]
     return next(iter(items.values()))
 
 
 def _label(item: dict[str, Any]) -> str:
+    """获取配置项的显示标签（优先 label > name > id）。"""
     return str(item.get("label") or item.get("name") or item["id"])
 
 
 def stage_choices() -> list[tuple[str, str]]:
+    """生成 Gradio 阶段选择器的选项列表（按 order 排序）。"""
     stages = sorted(load_stages().values(), key=lambda item: item.get("order", 999))
     return [(_label(stage), stage["id"]) for stage in stages]
 
 
 def customer_choices() -> list[tuple[str, str]]:
+    """生成 Gradio 客户选择器的选项列表（显示客户名 + 所属阶段 + 语气）。"""
     stages = load_stages()
     choices = [("按阶段自动匹配客户", "auto")]
     for customer in load_customers().values():
@@ -98,19 +131,23 @@ def customer_choices() -> list[tuple[str, str]]:
 
 
 def difficulty_choices() -> list[tuple[str, str]]:
+    """生成 Gradio 难度选择器的选项列表（按 level 排序）。"""
     difficulties = sorted(load_difficulties().values(), key=lambda item: item.get("level", 999))
     return [(_label(difficulty), difficulty["id"]) for difficulty in difficulties]
 
 
 def voice_choices() -> list[tuple[str, str]]:
+    """生成 Gradio 音色选择器的选项列表。"""
     return [(_label(voice), voice["id"]) for voice in load_voices().values()]
 
 
 def avatar_choices() -> list[tuple[str, str]]:
+    """生成 Gradio 头像选择器的选项列表。"""
     return [(_label(avatar), avatar["id"]) for avatar in load_avatars().values()]
 
 
 def _select_customer(customer_id: str | None, stage_id: str) -> dict[str, Any]:
+    """根据 customer_id 选择客户。auto 模式下按 stage_id 自动匹配。"""
     customers = load_customers()
     if customer_id and customer_id != "auto" and customer_id in customers:
         return customers[customer_id]
@@ -132,14 +169,17 @@ def resolve_training(
 
 
 def resolve_voice(voice_id: str | None) -> dict[str, Any]:
+    """解析音色配置，找不到则返回第一个。"""
     return _get_or_first(load_voices(), voice_id)
 
 
 def resolve_avatar(avatar_id: str | None) -> dict[str, Any]:
+    """解析头像配置，找不到则返回第一个。"""
     return _get_or_first(load_avatars(), avatar_id)
 
 
 def resolve_avatar_for_customer(customer_id: str | None, avatar_id: str | None = None) -> dict[str, Any]:
+    """根据客户 ID 自动匹配头像。优先级：显式指定 > 客户配置 > 模糊匹配 > 兜底。"""
     avatars = load_avatars()
     customers = load_customers()
 
@@ -162,6 +202,7 @@ def resolve_avatar_for_customer(customer_id: str | None, avatar_id: str | None =
 
 
 def _dump(data: dict[str, Any]) -> str:
+    """将 dict 序列化为 YAML 格式文本（用于嵌入 prompt）。"""
     return yaml.safe_dump(data, allow_unicode=True, sort_keys=False).strip()
 
 
@@ -277,7 +318,7 @@ def build_training_prompt_from_case(
     stage_id: str | None = None,
     difficulty_id: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Build a non-cached prompt for a fixed JSONL case and runtime state."""
+    """为指定的 JSONL 案例构建非缓存 prompt（用于运行时状态推进场景）。"""
     try:
         from .prompt_assembler import assemble_prompt
         from .training_data_context import build_model_context_for_case
@@ -321,6 +362,7 @@ def build_training_prompt(
     customer_id: str | None,
     difficulty_id: str | None,
 ) -> tuple[str, dict[str, Any]]:
+    """V1 版本 prompt 构建：基于 YAML 配置的硬编码 prompt 模板（JSONL 不可用时 fallback）。"""
     stage, customer, difficulty = resolve_training(stage_id, customer_id, difficulty_id)
     attitude = customer.get("attitude", {})
     state_curve = customer.get("state_curve", {})

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import html
 import os
+import random
 import uuid
 from pathlib import Path
 from typing import Any
@@ -27,8 +28,8 @@ BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
 
 try:
-    from .case_loader import case_count as get_case_count, find_case, get_case
-    from .fastrtc_new_web import LAST_STATUS, stream
+    from .case_loader import case_count as get_case_count, find_case, find_cases, get_case
+    from .fastrtc_new_web import LAST_STATUS, set_active_stream_selection, stream
     from .training_session import get_or_create_session_context
     from .training_config import (
         _label,
@@ -40,8 +41,8 @@ try:
     )
     from .training_data_context import recent_training_records, summarize_case_assets
 except ImportError:
-    from case_loader import case_count as get_case_count, find_case, get_case
-    from fastrtc_new_web import LAST_STATUS, stream
+    from case_loader import case_count as get_case_count, find_case, find_cases, get_case
+    from fastrtc_new_web import LAST_STATUS, set_active_stream_selection, stream
     from training_session import get_or_create_session_context
     from training_config import (
         _label,
@@ -60,14 +61,17 @@ DEFAULT_VOICE_ID = os.getenv("TRAINING_VOICE_ID", "longsanshu_v3")
 
 
 def _choice(items: list[tuple[str, str]]) -> list[dict[str, str]]:
+    """将 (label, value) 列表转为 Gradio Radio/Select 组件所需的 dict 格式。"""
     return [{"label": label, "value": value} for label, value in items]
 
 
 def _escape(value: Any) -> str:
+    """HTML 转义，防止 XSS 注入。"""
     return html.escape(str(value or ""), quote=True)
 
 
 def _clip(value: Any, limit: int = 90) -> str:
+    """文本截断，超过 limit 字符时加省略号。"""
     text = str(value or "").strip()
     if len(text) <= limit:
         return text
@@ -75,6 +79,7 @@ def _clip(value: Any, limit: int = 90) -> str:
 
 
 def _label_for(choices: list[tuple[str, str]], value: str) -> str:
+    """根据 value 在 choices 中查找对应的显示标签。"""
     for label, item_value in choices:
         if item_value == value:
             return label
@@ -86,26 +91,51 @@ def _resolve_case(
     difficulty_id: str,
     case_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    """解析训练配置并匹配案例，返回 (stage, customer, difficulty, case)。"""
     stage, customer, difficulty = resolve_training(stage_id, None, difficulty_id)
     case = get_case(case_id) if case_id else None
     if not case:
-        case = find_case(_label(stage), _label(difficulty))
+        candidates = find_cases(_label(stage), _label(difficulty))
+        case = random.choice(candidates) if candidates else None
     return stage, customer, difficulty, case
 
 
-def _dashboard_case_id(session_id: str | None, stage_id: str, difficulty_id: str, case_id: str | None = None) -> tuple[str, str]:
+_STATE_SIGS: dict[str, str] = {}
+
+
+def _dashboard_case_id(session_id: str | None, stage_id: str, difficulty_id: str, case_id: str | None = None) -> tuple[str, str, str]:
+    """为 Dashboard 生成或复用 session_id，并绑定案例。
+
+    当训练阶段或难度变化时（状态签名变了），清空旧 case 重新随机抽取；
+    同一 (stage, difficulty) 组合下则复用已选案例。
+    """
     session = session_id or uuid.uuid4().hex
     stage, _, difficulty = resolve_training(stage_id, None, difficulty_id)
+    stage_label = _label(stage)
+    diff_label = _label(difficulty)
+    state_sig = f"{stage_label}|{diff_label}"
+    key = f"dashboard-{session}"
+
+    # 状态签名变了 → 清空旧 case，强制重新随机
+    old_sig = _STATE_SIGS.get(key)
+    if old_sig and old_sig != state_sig:
+        case_id = None
+    _STATE_SIGS[key] = state_sig
+
     context = get_or_create_session_context(
-        f"dashboard-{session}",
-        _label(stage),
-        _label(difficulty),
+        key,
+        stage_label,
+        diff_label,
         preferred_case_id=case_id,
     )
-    return session, str(context.get("case_id") or "")
+    # 附上候选数，供 UI 展示
+    raw_count = context.get("candidate_count", 0) if isinstance(context, dict) else 0
+    candidate_count = int(raw_count) if isinstance(raw_count, (int, float)) else 0
+    return session, str(context.get("case_id") or ""), str(candidate_count)
 
 
 def _tag(text: Any) -> str:
+    """将文本包装为 HTML chip 标签样式。"""
     value = _escape(text)
     if not value:
         return ""
@@ -113,6 +143,7 @@ def _tag(text: Any) -> str:
 
 
 def render_header() -> str:
+    """渲染 Dashboard 顶部导航栏 HTML。"""
     return """
 <header class="dash-topbar">
   <div class="brand">
@@ -131,7 +162,8 @@ def render_header() -> str:
 """
 
 
-def render_persona(stage_id: str, difficulty_id: str, voice_id: str, case_id: str | None = None) -> str:
+def render_persona(stage_id: str, difficulty_id: str, voice_id: str, case_id: str | None = None, candidate_count: str = "") -> str:
+    """渲染客户人物卡片 HTML（头像、姓名、职位、关切标签）。"""
     stage, customer, difficulty, case = _resolve_case(stage_id, difficulty_id, case_id)
     assets = summarize_case_assets(case)
     voice = resolve_voice(voice_id)
@@ -151,6 +183,14 @@ def render_persona(stage_id: str, difficulty_id: str, voice_id: str, case_id: st
     desc = assets.get("scene") or assets.get("raw_call_summary") or customer.get("attitude", {}).get("style", "")
     role_line = " / ".join(part for part in (role, style) if part)
 
+    # 候选数提示：候选=1 时提示"数据只有1个"，避免误判随机失效
+    count_hint = ""
+    count_int = int(candidate_count) if candidate_count.isdigit() else 0
+    if count_int == 1:
+        count_hint = '<span class="tag warn" title="当前组合仅有 1 个案例，不会随机">候选 1</span>'
+    elif count_int > 1:
+        count_hint = f'<span class="tag" title="每次从 {count_int} 个案例中随机抽取">候选 {count_int}</span>'
+
     return f"""
 <div class="persona-card">
   <div class="avatar"><div class="face"></div></div>
@@ -165,11 +205,13 @@ def render_persona(stage_id: str, difficulty_id: str, voice_id: str, case_id: st
   <span>{_escape(_label(stage))}</span>
   <span>{_escape(_label(difficulty))}</span>
   <span>{_escape(voice.get("label", voice_id))}</span>
+  {count_hint}
 </div>
 """
 
 
 def render_goal(stage_id: str, difficulty_id: str, case_id: str | None = None) -> str:
+    """渲染训练目标 HTML。"""
     stage, _, _, case = _resolve_case(stage_id, difficulty_id, case_id)
     assets = summarize_case_assets(case)
     goal = stage.get("training_goal") or "完成有效开场，挖掘客户需求，并推进到下一步行动。"
@@ -179,8 +221,9 @@ def render_goal(stage_id: str, difficulty_id: str, case_id: str | None = None) -
 
 
 def render_voice_room(stage_id: str, difficulty_id: str, voice_id: str) -> str:
+    """渲染实时语音陪练房间 HTML。"""
     voice_label = _label_for(voice_choices(), voice_id)
-    stage_label = _label_for(stage_choices(), stage_id)
+    voice_name = voice_label.split("-", 1)[0].strip() or voice_label
     return f"""
 <section class="voice-room">
   <div class="panel-header">
@@ -192,7 +235,7 @@ def render_voice_room(stage_id: str, difficulty_id: str, voice_id: str) -> str:
       <div class="speaker">
         <div class="speaker-card ai"><div class="pulse-ring"></div><div class="headset">AI</div></div>
         <div class="speaker-name">模拟客户</div>
-        <div class="speaker-note">{_escape(voice_label)} · {_escape(stage_label)}</div>
+        <div class="speaker-note">{_escape(voice_name)}音色 · 情绪冷淡</div>
       </div>
       <div class="wave" aria-hidden="true">{''.join('<span class="bar"></span>' for _ in range(9))}</div>
       <div class="speaker">
@@ -201,16 +244,9 @@ def render_voice_room(stage_id: str, difficulty_id: str, voice_id: str) -> str:
         <div class="speaker-note">麦克风正常 · 可随时插话</div>
       </div>
     </div>
-    <div class="call-console">
-      <div class="call-controls" aria-label="通话状态">
-        <button class="call-action" title="麦克风"><span>麦</span></button>
-        <button class="call-action" title="重新连接"><span>↻</span></button>
-        <button class="call-action end" title="结束"><span>×</span></button>
-        <button class="call-action" title="文字记录"><span>讯</span></button>
-        <button class="call-action" title="设置"><span>设</span></button>
-      </div>
-      <div class="stream-wrap">
-        <iframe title="FastRTC 通话控制" src="/stream" allow="microphone; autoplay; camera"></iframe>
+    <div class="call-controls" aria-label="开始通话">
+      <div class="stream-native-control">
+        <iframe title="FastRTC 原生开始通话按钮" src="/stream" allow="microphone; autoplay; camera"></iframe>
       </div>
     </div>
   </div>
@@ -348,11 +384,23 @@ def render_coach_feedback(
 
 
 def render_transcript(status: dict[str, Any] | None = None) -> str:
+    """渲染对话记录 HTML（销售/客户气泡）。"""
     status = status or LAST_STATUS
     prompt = str(status.get("prompt") or "")
     response = str(status.get("response_text") or "")
     guardrail = str(status.get("guardrail") or "")
     stage = str(status.get("stage") or "waiting")
+    error = str(status.get("error") or "")
+
+    if error:
+        return f"""
+<div class="dialogue">
+  <div class="bubble ai error">
+    <div class="speaker-line"><span>系统提示</span><span>{_escape(stage)}</span></div>
+    {_escape(error)}
+  </div>
+</div>
+"""
 
     if not prompt and not response:
         return """
@@ -453,6 +501,8 @@ def render_session_info(status: dict[str, Any] | None = None) -> str:
     evaluation = status.get("evaluation") if isinstance(status.get("evaluation"), dict) else None
     if evaluation:
         details.append(f"复盘得分：{evaluation.get('total_score')}/100")
+    if status.get("error"):
+        details.append(f"错误：{_clip(status.get('error'), 120)}")
     return f'<div class="session-info">{" · ".join(_escape(item) for item in details)}</div>'
 
 
@@ -463,11 +513,12 @@ def update_training_view(
     session_id: str | None,
     case_id: str | None,
 ) -> tuple[str, str, str, str, str, str, str]:
-    session_id, selected_case_id = _dashboard_case_id(session_id, stage_id, difficulty_id, case_id)
+    session_id, selected_case_id, candidate_count = _dashboard_case_id(session_id, stage_id, difficulty_id, case_id)
+    set_active_stream_selection(stage_id, difficulty_id, voice_id, selected_case_id)
     return (
         session_id,
         selected_case_id,
-        render_persona(stage_id, difficulty_id, voice_id, selected_case_id),
+        render_persona(stage_id, difficulty_id, voice_id, selected_case_id, candidate_count),
         render_goal(stage_id, difficulty_id, selected_case_id),
         render_voice_room(stage_id, difficulty_id, voice_id),
         render_score(stage_id, difficulty_id, case_id=selected_case_id),
@@ -683,6 +734,11 @@ h1 {
   font-size: 12px;
 }
 
+.tag.warn {
+  background: #fff5d6;
+  color: #b45309;
+}
+
 .config-section,
 .persona-section,
 .goal-section {
@@ -852,8 +908,9 @@ h1 {
 .voice-room {
   min-height: 416px;
   background:
-    linear-gradient(180deg, rgba(255,255,255,0.92), rgba(246,250,255,0.92)),
-    repeating-linear-gradient(90deg, transparent 0 36px, rgba(19,184,166,0.04) 36px 37px);
+    linear-gradient(180deg, rgba(255,255,255,0.95), rgba(248,251,255,0.95)),
+    radial-gradient(circle at 24% 48%, rgba(20,184,166,0.10), transparent 28%),
+    radial-gradient(circle at 78% 42%, rgba(245,158,11,0.08), transparent 24%);
 }
 
 .call-state {
@@ -866,179 +923,148 @@ h1 {
 }
 
 .voice-stage {
-  padding: 10px 18px 14px;
+  padding: 14px 22px 18px;
 }
 
 .voice-main {
-  min-height: 220px;
+  min-height: 274px;
   display: grid;
-  grid-template-columns: minmax(150px, 1fr) 150px minmax(150px, 1fr);
+  grid-template-columns: minmax(150px, 1fr) 156px minmax(150px, 1fr);
   align-items: center;
-  gap: 18px;
-  padding: 0 34px 8px;
+  gap: 22px;
+  padding: 0 34px;
 }
 
 .speaker {
   display: grid;
   justify-items: center;
-  gap: 8px;
+  gap: 9px;
+  min-width: 0;
 }
 
 .speaker-card {
-  width: 158px;
-  height: 158px;
+  width: 176px;
+  height: 176px;
   position: relative;
   display: grid;
   place-items: center;
   border-radius: 50%;
   background: #fff;
   border: 1px solid #dce5f0;
-  box-shadow: 0 18px 36px rgba(18, 38, 63, 0.12);
+  box-shadow: 0 18px 38px rgba(18, 38, 63, 0.10);
 }
 
 .speaker-card.ai {
   background:
-    radial-gradient(circle at center, #ecfeff 0 45%, rgba(236,254,255,0.2) 46%),
+    radial-gradient(circle at center, rgba(236,254,255,0.96) 0 45%, rgba(236,254,255,0.45) 46%),
     linear-gradient(135deg, #ecfeff, #eef6ff);
 }
 
 .speaker-card.client {
   background:
-    radial-gradient(circle at center, #fff 0 48%, rgba(255,247,237,0.6) 49%),
+    radial-gradient(circle at center, #fff 0 48%, rgba(255,247,237,0.72) 49%),
     linear-gradient(135deg, #fff7ed, #fff);
 }
 
 .headset {
-  width: 70px;
-  height: 70px;
-  border-radius: 22px;
-  background: linear-gradient(135deg, var(--blue), var(--teal));
+  width: 78px;
+  height: 78px;
+  border-radius: 23px;
+  background: linear-gradient(135deg, #2563eb, var(--teal));
   display: grid;
   place-items: center;
   color: #fff;
-  font-size: 35px;
+  font-size: 39px;
   font-weight: 900;
+  line-height: 1;
+  box-shadow: 0 14px 26px rgba(37, 99, 235, 0.18);
 }
 
 .pulse-ring,
 .pulse-ring::before,
 .pulse-ring::after {
   position: absolute;
-  inset: 18px;
+  inset: 16px;
   border-radius: 50%;
-  border: 2px solid rgba(19, 184, 166, 0.24);
+  border: 2px solid rgba(20, 184, 166, 0.22);
 }
 
 .pulse-ring::before,
 .pulse-ring::after {
   content: "";
   inset: -14px;
-  opacity: 0.72;
+  opacity: 0.66;
 }
 
 .pulse-ring::after {
   inset: -30px;
-  opacity: 0.38;
+  opacity: 0.34;
 }
 
 .speaker-name {
-  font-size: 16px;
-  font-weight: 840;
+  font-size: 18px;
+  font-weight: 860;
+  color: var(--ink);
 }
 
 .speaker-note {
-  color: var(--muted);
+  color: #7186a2;
   font-size: 13px;
+  font-weight: 680;
   text-align: center;
+  line-height: 1.3;
 }
 
 .wave {
-  height: 84px;
+  height: 118px;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 7px;
 }
 
 .bar {
-  width: 7px;
+  width: 9px;
   border-radius: 999px;
-  background: linear-gradient(180deg, var(--teal), var(--blue));
-  box-shadow: 0 8px 18px rgba(19, 184, 166, 0.22);
+  background: linear-gradient(180deg, var(--teal), #2563eb);
+  box-shadow: 0 9px 18px rgba(37, 99, 235, 0.20);
 }
 
-.bar:nth-child(1) { height: 22px; }
-.bar:nth-child(2) { height: 48px; }
-.bar:nth-child(3) { height: 72px; }
-.bar:nth-child(4) { height: 36px; }
-.bar:nth-child(5) { height: 86px; }
-.bar:nth-child(6) { height: 58px; }
-.bar:nth-child(7) { height: 30px; }
-.bar:nth-child(8) { height: 64px; }
-.bar:nth-child(9) { height: 42px; }
-
-.call-console {
-  width: min(520px, 100%);
-  margin: 0 auto;
-  padding: 12px 12px 14px;
-  border: 1px solid #dce5f0;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.86);
-  box-shadow: 0 16px 34px rgba(18, 38, 63, 0.12);
-}
+.bar:nth-child(1) { height: 36px; }
+.bar:nth-child(2) { height: 64px; }
+.bar:nth-child(3) { height: 92px; }
+.bar:nth-child(4) { height: 56px; }
+.bar:nth-child(5) { height: 112px; }
+.bar:nth-child(6) { height: 78px; }
+.bar:nth-child(7) { height: 48px; }
+.bar:nth-child(8) { height: 88px; }
+.bar:nth-child(9) { height: 64px; }
 
 .call-controls {
   display: flex;
   justify-content: center;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 10px;
+  min-height: 70px;
+  margin-top: 8px;
 }
 
-.call-action {
-  width: 44px;
-  height: 44px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  border: 1px solid #d8e4f1;
-  background: #fff;
-  color: #1f3b5f;
-  font-size: 16px;
-  font-weight: 850;
-  box-shadow: 0 10px 24px rgba(16, 36, 63, 0.12);
-}
-
-.call-action span {
-  line-height: 1;
-}
-
-.call-action.end {
-  width: 54px;
-  height: 54px;
-  border: 0;
-  background: var(--red);
-  color: #fff;
-  font-size: 34px;
-  box-shadow: 0 14px 28px rgba(239, 68, 68, 0.24);
-}
-
-.stream-wrap {
-  height: 136px;
-  width: 100%;
-  margin: 0 auto;
-  border: 1px solid #dce5f0;
-  border-radius: 10px;
+.stream-native-control {
+  width: 270px;
+  height: 88px;
+  position: relative;
   overflow: hidden;
-  background: #fff;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.62);
+  border-radius: 14px;
+  background: transparent;
 }
 
-.stream-wrap iframe {
-  width: 100%;
-  height: 380px;
+.stream-native-control iframe {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 640px;
+  height: 420px;
   border: 0;
-  transform: translateY(-205px);
+  transform: translate(-50%, -244px);
   transform-origin: center top;
 }
 
@@ -1077,6 +1103,13 @@ h1 {
   max-width: 92%;
   background: #f0fdfa;
   border: 1px solid #99f6e4;
+}
+
+.bubble.error {
+  max-width: 96%;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  color: #9a3412;
 }
 
 .speaker-line {
@@ -1305,24 +1338,28 @@ h1 {
   }
 
   .voice-main {
-    grid-template-columns: 1fr 112px 1fr;
-    padding: 8px 24px 14px;
-    gap: 12px;
+    grid-template-columns: 1fr 120px 1fr;
+    gap: 14px;
+    padding: 0 22px;
   }
 
   .speaker-card {
-    width: 132px;
-    height: 132px;
+    width: 146px;
+    height: 146px;
   }
 
   .headset {
-    width: 64px;
-    height: 64px;
-    font-size: 31px;
+    width: 66px;
+    height: 66px;
+    font-size: 32px;
   }
 
-  .stream-wrap {
-    max-width: 460px;
+  .wave {
+    gap: 5px;
+  }
+
+  .bar {
+    width: 7px;
   }
 }
 
@@ -1332,21 +1369,17 @@ h1 {
   }
 
   .voice-main {
-    grid-template-columns: 1fr;
-    gap: 18px;
-    padding: 6px 18px 12px;
+    grid-template-columns: 1fr 116px 1fr;
+    padding: 0;
   }
 
-  .wave {
-    order: 2;
+  .speaker-card {
+    width: 136px;
+    height: 136px;
   }
 
   .call-controls {
     flex-wrap: wrap;
-  }
-
-  .stream-wrap {
-    height: 132px;
   }
 }
 """

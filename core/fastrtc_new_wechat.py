@@ -1,6 +1,24 @@
+"""
+fastrtc_new_wechat.py — H5/移动端语音处理链路
+
+职责：
+1. transcribe_uploaded_audio(): 将上传的音频文件（webm/mp4/wav）转为 PCM 并调用 ASR 识别
+2. run_customer_turn(): 同步版语音管道（ASR → LLM → guardrails → TTS），供 HTTP API 调用
+3. pcm_to_wav_bytes(): PCM 转 WAV 格式（用于调试和音频播放）
+
+与桌面版（fastrtc_new_web）的区别：
+- 桌面版使用 WebRTC 实时流 + Silero VAD，适合持续对话
+- 移动版使用录音上传模式，每次录音独立处理，适合 H5 / 企业微信场景
+"""
+
 from __future__ import annotations
+from dashscope.audio.tts_v2 import AudioFormat, SpeechSynthesizer
+from dashscope.audio.asr import Recognition
+from dashscope import Generation
+import dashscope
 
 import io
+import json
 import os
 import re
 import shutil
@@ -32,10 +50,6 @@ FFMPEG_BIN = os.getenv(
 if not shutil.which("ffmpeg") and os.path.exists(os.path.join(FFMPEG_BIN, "ffmpeg.exe")):
     os.environ["PATH"] = FFMPEG_BIN + os.pathsep + os.environ.get("PATH", "")
 
-import dashscope
-from dashscope import Generation
-from dashscope.audio.asr import Recognition
-from dashscope.audio.tts_v2 import AudioFormat, SpeechSynthesizer
 
 try:
     from .conversation_store import get_recent_memory, save_turn, update_turn_audio_bytes
@@ -100,7 +114,8 @@ def set_status(stage: str, **kwargs):
 
 
 def load_customer_profile() -> str:
-    profile_path = Path(os.getenv("CUSTOMER_PROFILE_PATH", DEFAULT_PROFILE_PATH))
+    profile_path = Path(
+        os.getenv("CUSTOMER_PROFILE_PATH", DEFAULT_PROFILE_PATH))
     try:
         return profile_path.read_text(encoding="utf-8").strip()
     except OSError as exc:
@@ -165,6 +180,67 @@ def strip_spoken_identity(text: str, customer_name: str | None = None) -> str:
         cleaned = speaker_prefix.sub("", cleaned).strip()
 
     return cleaned
+
+
+def _extract_json_object_text(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        return cleaned
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start >= 0 and end > start:
+        return cleaned[start:end + 1]
+    return ""
+
+
+def _json_string_value(text: str, key: str) -> str:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)"', text or "", re.DOTALL)
+    if not match:
+        return ""
+    try:
+        return json.loads(f'"{match.group(1)}"')
+    except json.JSONDecodeError:
+        return match.group(1).replace(r"\"", '"').replace(r"\n", "\n")
+
+
+def clean_customer_reply(raw_text: str, customer_name: str | None = None) -> str:
+    cleaned = (raw_text or "").strip()
+    if not cleaned:
+        return ""
+
+    json_text = _extract_json_object_text(cleaned)
+    if json_text:
+        try:
+            payload = json.loads(json_text)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            for key in ("customer_reply", "reply", "response_text", "response", "text", "content"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return strip_spoken_identity(value, customer_name)
+        fallback = _json_string_value(json_text, "customer_reply")
+        if fallback:
+            return strip_spoken_identity(fallback, customer_name)
+
+    cleaned = strip_spoken_identity(cleaned, customer_name)
+    json_prefix = _json_string_value(cleaned, "customer_reply")
+    if json_prefix:
+        return strip_spoken_identity(json_prefix, customer_name)
+    return cleaned
+
+
+def parse_customer_payload(raw_text: str) -> dict:
+    json_text = _extract_json_object_text(raw_text or "")
+    if not json_text:
+        return {}
+    try:
+        payload = json.loads(json_text)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def is_role_reversed_sales_reply(text: str) -> bool:
@@ -254,8 +330,10 @@ def synthesize_with_retry(response_text: str, voice_config: dict, attempts: int 
     for attempt in range(1, attempts + 1):
         try:
             synthesizer = SpeechSynthesizer(
-                model=voice_config.get("model") or os.getenv("DASHSCOPE_TTS_MODEL", "cosyvoice-v1"),
-                voice=voice_config.get("voice") or os.getenv("DASHSCOPE_TTS_VOICE", "longxiaochun"),
+                model=voice_config.get("model") or os.getenv(
+                    "DASHSCOPE_TTS_MODEL", "cosyvoice-v1"),
+                voice=voice_config.get("voice") or os.getenv(
+                    "DASHSCOPE_TTS_VOICE", "longxiaochun"),
                 format=AudioFormat.PCM_24000HZ_MONO_16BIT,
             )
             audio_bytes = synthesizer.call(response_text)
@@ -264,7 +342,8 @@ def synthesize_with_retry(response_text: str, voice_config: dict, attempts: int 
             last_error = RuntimeError("DashScope TTS returned empty audio.")
         except Exception as exc:
             last_error = exc
-            set_status("tts_retry", error=f"attempt {attempt}/{attempts}: {type(exc).__name__}: {exc}")
+            set_status(
+                "tts_retry", error=f"attempt {attempt}/{attempts}: {type(exc).__name__}: {exc}")
             time.sleep(0.6)
 
     raise RuntimeError(f"TTS failed after {attempts} attempts: {last_error}")
@@ -393,9 +472,11 @@ def run_customer_turn(
         "avatar": avatar_config.get("label", selected_avatar_id),
     }
     raw_recent_memory = get_recent_memory(session_id, limit=10)
-    recent_memory, removed_memory_lines = sanitize_recent_memory(raw_recent_memory)
+    recent_memory, removed_memory_lines = sanitize_recent_memory(
+        raw_recent_memory)
     if removed_memory_lines:
-        set_status("memory_sanitized", removed_role_reversed_lines=removed_memory_lines)
+        set_status("memory_sanitized",
+                   removed_role_reversed_lines=removed_memory_lines)
     memory_prompt = (
         f"【当前会话记忆】\n{recent_memory}"
         if recent_memory
@@ -408,7 +489,8 @@ def run_customer_turn(
         f"性格气质：{avatar_config.get('temperament', '')}\n"
         f"表现方式：{avatar_config.get('visual_style', '')}"
     )
-    role_guard_prompt = build_role_guard_prompt(training_summary.get("customer"))
+    role_guard_prompt = build_role_guard_prompt(
+        training_summary.get("customer"))
     set_status(
         "training_loaded",
         prompt=prompt,
@@ -416,7 +498,7 @@ def run_customer_turn(
     )
 
     qwen_response = Generation.call(
-        model=os.getenv("DASHSCOPE_LLM_MODEL", "qwen-turbo"),
+        model=os.getenv("DASHSCOPE_LLM_MODEL", "qwen3.6-plus"),
         messages=[
             {
                 "role": "system",
@@ -435,14 +517,20 @@ def run_customer_turn(
 
     if qwen_response.status_code == 200:
         raw_response_text = qwen_response.output.choices[0].message.content
-        response_text = strip_spoken_identity(raw_response_text, training_summary.get("customer"))
+        payload = parse_customer_payload(raw_response_text)
+        next_state = str(payload.get("next_state") or "")
+        triggered_events = payload.get("triggered_events") if isinstance(payload.get("triggered_events"), list) else []
+        score_notes = payload.get("score_notes") if isinstance(payload.get("score_notes"), dict) else {}
+        response_text = clean_customer_reply(raw_response_text, training_summary.get("customer"))
         if not response_text:
             response_text = raw_response_text.strip() or "嗯，您先说说具体想怎么合作？"
         if is_role_reversed_sales_reply(response_text):
-            response_text = build_customer_guardrail_reply(prompt, training_state)
+            response_text = build_customer_guardrail_reply(
+                prompt, training_state)
             guardrail_reason = "role_reversed_sales_reply"
         elif is_hostile_or_confused_user_text(prompt):
-            response_text = build_customer_guardrail_reply(prompt, training_state)
+            response_text = build_customer_guardrail_reply(
+                prompt, training_state)
             guardrail_reason = "hostile_or_confused_user_text"
         else:
             guardrail_reason = ""
@@ -450,6 +538,10 @@ def run_customer_turn(
         raw_response_text = "抱歉，系统开小差了。"
         response_text = raw_response_text
         guardrail_reason = ""
+        payload = {}
+        next_state = ""
+        triggered_events = []
+        score_notes = {}
         set_status("qwen_error", error=qwen_response.message)
 
     qwen_status = {"response_text": response_text}
@@ -457,6 +549,12 @@ def run_customer_turn(
         qwen_status["raw_response_text"] = raw_response_text
     if guardrail_reason:
         qwen_status["guardrail"] = guardrail_reason
+    if next_state:
+        qwen_status["next_state"] = next_state
+    if triggered_events:
+        qwen_status["triggered_events"] = triggered_events
+    if score_notes:
+        qwen_status["score_notes"] = score_notes
     set_status("qwen_done", **qwen_status)
 
     turn_id = None
@@ -472,13 +570,17 @@ def run_customer_turn(
                 "difficulty_id": selected_difficulty_id,
                 "voice_id": selected_voice_id,
                 "avatar_id": selected_avatar_id,
+                "next_state": next_state,
+                "triggered_events": triggered_events,
+                "score_notes": score_notes,
             },
         )
         set_status(
             "turn_saved",
             prompt=prompt,
             response_text=response_text,
-            training={**training_state, "session_id": session_id, "turn_index": turn_index},
+            training={**training_state, "session_id": session_id,
+                      "turn_index": turn_index},
         )
     except Exception as exc:
         set_status("save_error", error=f"{type(exc).__name__}: {exc}")
@@ -497,4 +599,7 @@ def run_customer_turn(
         "turn_index": turn_index,
         "audio_bytes": audio_bytes,
         "sample_rate": 24000,
+        "next_state": next_state,
+        "triggered_events": triggered_events,
+        "score_notes": score_notes,
     }

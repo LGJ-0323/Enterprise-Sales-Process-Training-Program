@@ -1,3 +1,24 @@
+"""
+training_evaluator.py — 训练评分引擎
+
+提供两种评分模式：
+1. LLM 评分（_llm_evaluation）：调用千问模型，基于评分维度（rubric）对对话进行智能打分
+2. 启发式评分（_heuristic_evaluation）：基于关键词匹配的规则打分，无需调用 LLM
+
+评分维度来自 evaluation_rubrics.jsonl，包含：
+- scoring_dimensions: 各评分维度及分值
+- must_do: 必须覆盖的销售动作
+- critical_mistakes: 扣分红线
+- ideal_sales_flow: 理想销售推进路径
+
+评分结果包含：
+- total_score: 综合得分（0-100）
+- dimension_scores: 各维度得分明细
+- strengths: 本轮亮点
+- improvements: 改进建议
+- summary: 一句话总结
+"""
+
 from __future__ import annotations
 
 import json
@@ -17,11 +38,13 @@ except ImportError:
 
 
 def _clip(text: Any, limit: int = 180) -> str:
+    """文本截断工具，超过 limit 字符时截断并加省略号。"""
     value = str(text or "").strip()
     return value if len(value) <= limit else value[: limit - 1].rstrip() + "..."
 
 
 def _conversation_text(turns: list[dict[str, Any]], limit: int = 24) -> str:
+    """将对话轮次格式化为「销售：xxx / 客户：xxx」的纯文本，用于评分 prompt。"""
     lines: list[str] = []
     for turn in turns[-limit:]:
         user = str(turn.get("user_text") or "").strip()
@@ -34,18 +57,34 @@ def _conversation_text(turns: list[dict[str, Any]], limit: int = 24) -> str:
 
 
 def _all_sales_text(turns: list[dict[str, Any]]) -> str:
+    """提取所有销售（员工）发言的纯文本拼接。"""
     return "\n".join(str(t.get("user_text") or "") for t in turns)
 
 
 def _all_customer_text(turns: list[dict[str, Any]]) -> str:
+    """提取所有客户发言的纯文本拼接。"""
     return "\n".join(str(t.get("assistant_text") or "") for t in turns)
 
 
 def _has_any(text: str, words: tuple[str, ...]) -> bool:
+    """检查文本中是否包含任意一个关键词。"""
     return any(word in text for word in words)
 
 
 def _heuristic_ratio(dimension: str, sales_text: str, customer_text: str, full_text: str) -> tuple[float, str]:
+    """基于关键词匹配的启发式评分。
+
+    根据评分维度名称中的关键词，判断销售发言中是否包含对应的有效动作，
+    返回 (得分比例 0-1, 评分依据)。
+
+    覆盖的维度类型：
+    - 开场/破冰：检查是否有自我介绍和来意说明
+    - 需求追问：检查是否追问客户现状和业务信息
+    - 异议处理：检查是否识别并回应客户顾虑
+    - 专业价值：检查是否体现物流专业知识
+    - 推进闭环：检查是否有明确的下一步动作
+    - 信息补全：检查是否补充了客户或货物信息
+    """
     dim = dimension
     evidence: list[str] = []
     ratio = 0.58
@@ -65,8 +104,10 @@ def _heuristic_ratio(dimension: str, sales_text: str, customer_text: str, full_t
             evidence.append("需求追问和客户信息补全偏少")
 
     elif any(key in dim for key in ("价格", "异议", "情绪", "解决方案", "异常")):
-        concern = _has_any(customer_text, ("贵", "价格", "比", "固定", "担心", "问题", "延误", "清关", "排舱", "涨价"))
-        response = _has_any(sales_text, ("理解", "费用", "方案", "对比", "清关", "派送", "时效", "锁舱", "处理", "跟进"))
+        concern = _has_any(customer_text, ("贵", "价格", "比",
+                           "固定", "担心", "问题", "延误", "清关", "排舱", "涨价"))
+        response = _has_any(sales_text, ("理解", "费用", "方案",
+                            "对比", "清关", "派送", "时效", "锁舱", "处理", "跟进"))
         if concern and response:
             ratio = 0.8
             evidence.append("识别并回应了客户顾虑")
@@ -113,6 +154,11 @@ def _heuristic_evaluation(
     rubric: dict[str, Any] | None,
     turns: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    """启发式评分：基于关键词规则对每个评分维度进行打分。
+
+    无需调用 LLM，速度快，适合快速反馈场景。
+    评分精度低于 LLM 评分，但可作为 LLM 评分的 fallback。
+    """
     dimensions = (rubric or {}).get("scoring_dimensions") or []
     sales_text = _all_sales_text(turns)
     customer_text = _all_customer_text(turns)
@@ -121,7 +167,8 @@ def _heuristic_evaluation(
     dimension_scores: list[dict[str, Any]] = []
     for dim in dimensions:
         max_score = int(dim.get("score") or 0)
-        ratio, reason = _heuristic_ratio(str(dim.get("dimension") or ""), sales_text, customer_text, full_text)
+        ratio, reason = _heuristic_ratio(
+            str(dim.get("dimension") or ""), sales_text, customer_text, full_text)
         score = max(0, min(max_score, round(max_score * ratio)))
         dimension_scores.append(
             {
@@ -133,9 +180,11 @@ def _heuristic_evaluation(
         )
 
     total_score = sum(item["score"] for item in dimension_scores)
-    max_total = sum(item["max_score"] for item in dimension_scores) or int((rubric or {}).get("total_score") or 100)
+    max_total = sum(item["max_score"] for item in dimension_scores) or int(
+        (rubric or {}).get("total_score") or 100)
     normalized_total = round(total_score * 100 / max_total) if max_total else 0
 
+    # 生成固定格式的改进建议和亮点总结
     improvements = [
         "下一轮优先把客户当前进展、货量、目的地和核心顾虑问具体。",
         "遇到价格或时效异议时，先复述客户担心，再用费用结构或案例对比回应。",
@@ -164,11 +213,13 @@ def _heuristic_evaluation(
 
 
 def _extract_json_payload(text: str) -> dict[str, Any]:
+    """从 LLM 回复文本中提取 JSON 对象（支持纯 JSON 和 Markdown 包裹的 JSON）。"""
     try:
         payload = json.loads(text)
         return payload if isinstance(payload, dict) else {}
     except json.JSONDecodeError:
         pass
+    # 尝试从文本中提取第一个 {...} 块
     match = re.search(r"\{.*\}", text or "", re.S)
     if not match:
         return {}
@@ -185,11 +236,16 @@ def _normalize_evaluation(
     case: dict[str, Any] | None,
     rubric: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
+    """将 LLM 返回的评分 JSON 标准化为统一格式。
+
+    校验维度名称和分值是否与 rubric 匹配，对分数做边界约束。
+    """
     dimensions = (rubric or {}).get("scoring_dimensions") or []
     if not dimensions:
         return None
 
-    by_name = {str(d.get("dimension") or ""): int(d.get("score") or 0) for d in dimensions}
+    by_name = {str(d.get("dimension") or ""): int(
+        d.get("score") or 0) for d in dimensions}
     raw_scores = payload.get("dimension_scores")
     if not isinstance(raw_scores, list):
         return None
@@ -222,8 +278,10 @@ def _normalize_evaluation(
     max_total = sum(item["max_score"] for item in normalized) or 100
     normalized_total = round(total * 100 / max_total)
 
-    strengths = payload.get("strengths") if isinstance(payload.get("strengths"), list) else []
-    improvements = payload.get("improvements") if isinstance(payload.get("improvements"), list) else []
+    strengths = payload.get("strengths") if isinstance(
+        payload.get("strengths"), list) else []
+    improvements = payload.get("improvements") if isinstance(
+        payload.get("improvements"), list) else []
 
     return {
         "session_id": session_id,
@@ -245,6 +303,10 @@ def _llm_evaluation(
     rubric: dict[str, Any] | None,
     turns: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
+    """LLM 智能评分：调用千问模型基于 rubric 维度对对话进行打分。
+
+    优先使用此方法，评分更精准。失败时 fallback 到启发式评分。
+    """
     if not rubric or not os.getenv("DASHSCOPE_API_KEY"):
         return None
     try:
@@ -276,7 +338,7 @@ def _llm_evaluation(
     )
     try:
         resp = Generation.call(
-            model=os.getenv("DASHSCOPE_LLM_MODEL", "qwen-turbo"),
+            model=os.getenv("DASHSCOPE_LLM_MODEL", "qwen3.6-plus"),
             messages=[{"role": "user", "content": prompt}],
             result_format="message",
         )
@@ -297,12 +359,29 @@ def evaluate_training_session(
     turns: list[dict[str, Any]] | None = None,
     prefer_llm: bool = True,
 ) -> dict[str, Any]:
+    """训练会话评分入口函数。
+
+    优先使用 LLM 评分（更精准），LLM 评分失败时自动 fallback 到启发式评分（更稳定）。
+
+    Args:
+        session_id: 会话 ID
+        case_id: 案例 ID（用于查找对应的 rubric）
+        source_call_id: 原始通话 ID
+        training_type: 训练类型
+        turns: 对话轮次列表（不传则从数据库读取）
+        prefer_llm: 是否优先使用 LLM 评分
+
+    Returns:
+        评分结果 dict，包含 total_score、dimension_scores、strengths、improvements 等
+    """
     case = get_case(case_id) if case_id else None
     if case:
         source_call_id = source_call_id or case.get("source_call_id")
         training_type = training_type or case.get("training_type")
-    rubric = find_rubric(case_id=case_id, source_call_id=source_call_id, training_type=training_type)
-    session_turns = turns if turns is not None else get_session_turns(session_id)
+    rubric = find_rubric(
+        case_id=case_id, source_call_id=source_call_id, training_type=training_type)
+    session_turns = turns if turns is not None else get_session_turns(
+        session_id)
 
     if prefer_llm:
         evaluation = _llm_evaluation(session_id, case, rubric, session_turns)

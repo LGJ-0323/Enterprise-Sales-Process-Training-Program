@@ -32,7 +32,8 @@ def _load_all_cases(path: str | Path | None = None) -> list[dict[str, Any]]:
                 continue
             try:
                 case = json.loads(line)
-                cases.append(case)
+                if isinstance(case, dict):
+                    cases.append(case)
             except json.JSONDecodeError:
                 continue
     return cases

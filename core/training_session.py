@@ -19,6 +19,8 @@ except ImportError:
 
 _LOCK = threading.Lock()
 _SESSIONS: dict[str, dict[str, Any]] = {}
+_ACTIVE_CASE_BY_COMBO: dict[tuple[str, str, str | None], str] = {}
+_LAST_RANDOM_CASE_BY_COMBO: dict[tuple[str, str, str | None], str] = {}
 
 
 def _initial_state(case: dict[str, Any]) -> str:
@@ -73,36 +75,80 @@ def _is_matching_case(case: dict[str, Any], training_type: str, difficulty: str)
     return case.get("case_id") in candidate_ids
 
 
+def _combo_key(training_type: str, difficulty: str, business_line: str | None = None) -> tuple[str, str, str | None]:
+    return (str(training_type or ""), str(difficulty or ""), business_line)
+
+
+def set_active_case_for_combo(
+    training_type: str,
+    difficulty: str,
+    case_id: str | None,
+    business_line: str | None = None,
+) -> None:
+    """Remember the dashboard-selected case so voice sessions use the same customer."""
+    if not case_id:
+        return
+    with _LOCK:
+        _ACTIVE_CASE_BY_COMBO[_combo_key(training_type, difficulty, business_line)] = str(case_id)
+
+
+def get_active_case_for_combo(
+    training_type: str,
+    difficulty: str,
+    business_line: str | None = None,
+) -> str | None:
+    with _LOCK:
+        return _ACTIVE_CASE_BY_COMBO.get(_combo_key(training_type, difficulty, business_line))
+
+
+def _choose_random_case(candidates: list[dict[str, Any]], key: tuple[str, str, str | None]) -> dict[str, Any] | None:
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        case = candidates[0]
+    else:
+        last_case_id = _LAST_RANDOM_CASE_BY_COMBO.get(key)
+        pool = [case for case in candidates if case.get("case_id") != last_case_id]
+        case = random.choice(pool or candidates)
+    if case and case.get("case_id"):
+        _LAST_RANDOM_CASE_BY_COMBO[key] = str(case.get("case_id"))
+    return case
+
+
 def get_or_create_session_context(
     session_id: str,
     training_type: str,
     difficulty: str,
     business_line: str | None = None,
     preferred_case_id: str | None = None,
+    use_active_case: bool = False,
 ) -> dict[str, Any]:
     """Return a stable case/state context for this session.
 
     If the session changes stage or difficulty, a new case is selected.
     """
     candidates = find_cases(training_type, difficulty, business_line)
+    key = _combo_key(training_type, difficulty, business_line)
 
     with _LOCK:
+        active_case_id = preferred_case_id or (_ACTIVE_CASE_BY_COMBO.get(key) if use_active_case else None)
         existing = _SESSIONS.get(session_id)
         if (
             existing
             and existing.get("training_type") == training_type
             and existing.get("difficulty") == difficulty
             and existing.get("business_line") == business_line
+            and (not active_case_id or existing.get("case_id") == active_case_id)
         ):
             return dict(existing)
 
         case = None
-        if preferred_case_id:
-            preferred = get_case(preferred_case_id)
+        if active_case_id:
+            preferred = get_case(active_case_id)
             if preferred and _is_matching_case(preferred, training_type, difficulty):
                 case = preferred
         if case is None and candidates:
-            case = random.choice(candidates)
+            case = _choose_random_case(candidates, key)
 
         context = {
             "session_id": session_id,
@@ -116,6 +162,8 @@ def get_or_create_session_context(
         }
         if case:
             _with_terminal_flags(context, case)
+            if case.get("case_id"):
+                _ACTIVE_CASE_BY_COMBO[key] = str(case.get("case_id"))
         _SESSIONS[session_id] = context
         return dict(context)
 

@@ -36,8 +36,46 @@ try:
     from dotenv import load_dotenv
 except ImportError:
     load_dotenv = None
-if load_dotenv:
-    load_dotenv(PROJECT_DIR / ".env")
+
+
+def _truthy_env(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_project_env(path: Path) -> None:
+    """Load project .env even when python-dotenv is missing in the conda env."""
+    if not path.exists():
+        return
+    override = _truthy_env(os.getenv("DOTENV_OVERRIDE"))
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == "DOTENV_OVERRIDE" and _truthy_env(value):
+                override = True
+                break
+    except OSError:
+        pass
+    if load_dotenv:
+        load_dotenv(path, override=override)
+        return
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if override or key not in os.environ:
+                os.environ[key] = value
+    except OSError:
+        pass
+
+
+_load_project_env(PROJECT_DIR / ".env")
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -66,7 +104,11 @@ try:
         update_turn_audio_bytes,
     )
     from .case_loader import get_case
-    from .training_session import advance_session_state, get_or_create_session_context
+    from .training_session import (
+        advance_session_state,
+        get_or_create_session_context,
+        set_active_case_for_combo,
+    )
     from .training_evaluator import evaluate_training_session
     from .training_config import (
         _label,
@@ -91,7 +133,11 @@ except ImportError:
         update_turn_audio_bytes,
     )
     from case_loader import get_case
-    from training_session import advance_session_state, get_or_create_session_context
+    from training_session import (
+        advance_session_state,
+        get_or_create_session_context,
+        set_active_case_for_combo,
+    )
     from training_evaluator import evaluate_training_session
     from training_config import (
         _label,
@@ -117,6 +163,13 @@ DEFAULT_CUSTOMER_ID = os.getenv("TRAINING_CUSTOMER_ID", "auto")
 DEFAULT_DIFFICULTY_ID = os.getenv("TRAINING_DIFFICULTY_ID", "easy")
 DEFAULT_VOICE_ID = os.getenv("TRAINING_VOICE_ID", "longsanshu_v3")
 DEFAULT_AVATAR_ID = os.getenv("TRAINING_AVATAR_ID", "auto")
+_ACTIVE_STREAM_LOCK = threading.Lock()
+_ACTIVE_STREAM_SELECTION = {
+    "stage_id": DEFAULT_STAGE_ID,
+    "difficulty_id": DEFAULT_DIFFICULTY_ID,
+    "voice_id": DEFAULT_VOICE_ID,
+    "case_id": "",
+}
 
 
 def _env_float(name: str, default: float) -> float:
@@ -142,23 +195,26 @@ def _env_bool(name: str, default: bool) -> bool:
 
 ASR_SAMPLE_RATE = _env_int("WEBRTC_ASR_SAMPLE_RATE", 16000)
 ASR_FORMAT = os.getenv("WEBRTC_ASR_FORMAT", "pcm").strip().lower()
-ASR_TRAILING_SILENCE_MS = _env_int("WEBRTC_ASR_TRAILING_SILENCE_MS", 1200)
-ASR_MAX_SENTENCE_SILENCE_MS = _env_int("WEBRTC_ASR_MAX_SENTENCE_SILENCE_MS", 1200)
+ASR_TRAILING_SILENCE_MS = _env_int("WEBRTC_ASR_TRAILING_SILENCE_MS", 4500)
+ASR_MAX_SENTENCE_SILENCE_MS = _env_int("WEBRTC_ASR_MAX_SENTENCE_SILENCE_MS", 4500)
 ASR_SEMANTIC_PUNCTUATION_ENABLED = _env_bool("WEBRTC_ASR_SEMANTIC_PUNCTUATION_ENABLED", False)
 ASR_MULTI_THRESHOLD_MODE_ENABLED = _env_bool("WEBRTC_ASR_MULTI_THRESHOLD_MODE_ENABLED", True)
-ASR_USE_CALLBACK = _env_bool("WEBRTC_ASR_USE_CALLBACK", True)
-ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S = _env_float("WEBRTC_ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S", 6.0)
-ASR_CALLBACK_GRACE_S = _env_float("WEBRTC_ASR_CALLBACK_GRACE_S", 1.4)
+ASR_USE_CALLBACK = _env_bool("WEBRTC_ASR_USE_CALLBACK", False)
+ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S = _env_float("WEBRTC_ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S", 12.0)
+ASR_CALLBACK_GRACE_S = _env_float("WEBRTC_ASR_CALLBACK_GRACE_S", 3.0)
 ASR_CALLBACK_FRAME_BYTES = _env_int("WEBRTC_ASR_CALLBACK_FRAME_BYTES", 6400)
-ASR_SYNC_FALLBACK = _env_bool("WEBRTC_ASR_SYNC_FALLBACK", False)
+ASR_SYNC_FALLBACK = _env_bool("WEBRTC_ASR_SYNC_FALLBACK", True)
+ASR_CALLBACK_TIMEOUT_ERROR = "ASR callback timeout before first final sentence"
+ASR_EMPTY_NOTICE = "\u6211\u8fd9\u8fb9\u6ca1\u542c\u6e05\uff0c\u8bf7\u518d\u8bf4\u4e00\u904d\u3002"
+ASR_ERROR_NOTICE = "\u8bed\u97f3\u8bc6\u522b\u6682\u65f6\u5931\u8d25\uff0c\u8bf7\u518d\u8bf4\u4e00\u904d\u3002"
 VAD_AUDIO_CHUNK_DURATION = _env_float("WEBRTC_AUDIO_CHUNK_DURATION", 0.45)
 VAD_STARTED_TALKING_THRESHOLD = _env_float("WEBRTC_STARTED_TALKING_THRESHOLD", 0.18)
 VAD_SPEECH_THRESHOLD = _env_float("WEBRTC_SPEECH_THRESHOLD", 0.12)
-VAD_MAX_CONTINUOUS_SPEECH_S = _env_float("WEBRTC_MAX_CONTINUOUS_SPEECH_S", 12.0)
+VAD_MAX_CONTINUOUS_SPEECH_S = _env_float("WEBRTC_MAX_CONTINUOUS_SPEECH_S", 30.0)
 VAD_THRESHOLD = _env_float("WEBRTC_VAD_THRESHOLD", 0.40)
 VAD_MIN_SPEECH_DURATION_MS = _env_int("WEBRTC_MIN_SPEECH_DURATION_MS", 300)
-VAD_MIN_SILENCE_DURATION_MS = _env_int("WEBRTC_MIN_SILENCE_DURATION_MS", 2500)
-VAD_SPEECH_PAD_MS = _env_int("WEBRTC_SPEECH_PAD_MS", 350)
+VAD_MIN_SILENCE_DURATION_MS = _env_int("WEBRTC_MIN_SILENCE_DURATION_MS", 4500)
+VAD_SPEECH_PAD_MS = _env_int("WEBRTC_SPEECH_PAD_MS", 600)
 
 STAGE_IDS = set(load_stages())
 DIFFICULTY_IDS = set(load_difficulties())
@@ -172,6 +228,36 @@ LAST_STATUS = {
 }
 _EVAL_LOCK = threading.Lock()
 _EVAL_JOBS: set[str] = set()
+
+
+def set_active_stream_selection(
+    stage_id: str | None = None,
+    difficulty_id: str | None = None,
+    voice_id: str | None = None,
+    case_id: str | None = None,
+) -> dict:
+    """让外层 Dashboard 与 /stream 语音 handler 使用同一套训练选择。"""
+    with _ACTIVE_STREAM_LOCK:
+        if stage_id in STAGE_IDS:
+            _ACTIVE_STREAM_SELECTION["stage_id"] = str(stage_id)
+        if difficulty_id in DIFFICULTY_IDS:
+            _ACTIVE_STREAM_SELECTION["difficulty_id"] = str(difficulty_id)
+        if voice_id in VOICE_IDS:
+            _ACTIVE_STREAM_SELECTION["voice_id"] = str(voice_id)
+        _ACTIVE_STREAM_SELECTION["case_id"] = str(case_id or "")
+        active = dict(_ACTIVE_STREAM_SELECTION)
+
+    stage_label = _choice_label(stage_choices(), active["stage_id"])
+    difficulty_label = _choice_label(difficulty_choices(), active["difficulty_id"])
+    if active.get("case_id"):
+        set_active_case_for_combo(stage_label, difficulty_label, active["case_id"])
+    return active
+
+
+def get_active_stream_selection() -> dict:
+    with _ACTIVE_STREAM_LOCK:
+        return dict(_ACTIVE_STREAM_SELECTION)
+
 
 def set_status(stage: str, **kwargs):
     LAST_STATUS.update({"time": datetime.now().isoformat(timespec="seconds"), "stage": stage, "error": "", **kwargs})
@@ -361,10 +447,17 @@ def _build_session_training_prompt(
     session_id: str,
     stage_id: str,
     difficulty_id: str,
+    preferred_case_id: str | None = None,
 ) -> tuple[str, dict, dict]:
     stage_label = _choice_label(stage_choices(), stage_id)
     difficulty_label = _choice_label(difficulty_choices(), difficulty_id)
-    context = get_or_create_session_context(session_id, stage_label, difficulty_label)
+    context = get_or_create_session_context(
+        session_id,
+        stage_label,
+        difficulty_label,
+        preferred_case_id=preferred_case_id,
+        use_active_case=True,
+    )
     case = get_case(context.get("case_id"))
     if not case:
         prompt, summary = build_training_prompt_v2(stage_id, DEFAULT_CUSTOMER_ID, difficulty_id)
@@ -807,7 +900,7 @@ def _recognize_audio_callback(
     if not callback.first_final_event.wait(ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S):
         timings["asr_callback_timeout_s"] = ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S
         prompt = callback.prompt()
-        return prompt, "" if prompt else "ASR callback timeout before first final sentence"
+        return prompt, "" if prompt else ASR_CALLBACK_TIMEOUT_ERROR
 
     if callback.error_event.is_set():
         return "", callback.error_message
@@ -836,12 +929,35 @@ def _recognize_audio_fast(
     if not ASR_USE_CALLBACK:
         return _recognize_audio_sync(audio_path, audio_format, sample_rate, asr_options, timings)
     try:
-        return _recognize_audio_callback(audio_path, audio_format, sample_rate, asr_options, timings)
+        prompt, error = _recognize_audio_callback(audio_path, audio_format, sample_rate, asr_options, timings)
+        if error == ASR_CALLBACK_TIMEOUT_ERROR and ASR_SYNC_FALLBACK:
+            timings["asr_callback_fallback_reason"] = error
+            fallback_prompt, fallback_error = _recognize_audio_sync(audio_path, audio_format, sample_rate, asr_options, timings)
+            timings["asr_callback_fallback_used"] = True
+            if fallback_error:
+                return "", f"{error}; sync fallback failed: {fallback_error}"
+            return fallback_prompt, ""
+        return prompt, error
     except Exception as exc:
         timings["asr_callback_error"] = f"{type(exc).__name__}: {exc}"
         if ASR_SYNC_FALLBACK:
+            timings["asr_callback_fallback_reason"] = timings["asr_callback_error"]
+            timings["asr_callback_fallback_used"] = True
             return _recognize_audio_sync(audio_path, audio_format, sample_rate, asr_options, timings)
         return "", f"{type(exc).__name__}: {exc}"
+
+
+def _friendly_asr_error(message: str) -> str:
+    raw = str(message or "").strip()
+    compact = raw.lower()
+    if "access denied" in compact or "account is in good standing" in compact:
+        return (
+            "DashScope ASR 鉴权失败：当前 DASHSCOPE_API_KEY 对实时语音识别无权限、账号欠费/未开通，"
+            "或正在使用旧的系统环境变量 Key。请在项目 .env 中填入可用 Key，确认已开通 Paraformer 实时语音识别，"
+            "然后重启服务。原始错误："
+            f"{raw}"
+        )
+    return raw
 
 
 # ═══════════════════════════════════════════════════════
@@ -877,7 +993,7 @@ def run_customer_turn(
     guard_prompt = build_role_guard_prompt(training_summary.get("customer"))
     quality_prompt = build_customer_quality_prompt(mem)
     set_status("loaded", prompt=prompt, training={**st, "session_id": session_id})
-    resp = Generation.call(model=os.getenv("DASHSCOPE_LLM_MODEL","qwen-plus"),
+    resp = Generation.call(model=os.getenv("DASHSCOPE_LLM_MODEL","qwen3.6-plus"),
         messages=[{"role":"system","content":f"{training_prompt}\n\n{avatar_prompt}\n\n{mem_prompt}\n\n{guard_prompt}\n\n{quality_prompt}"},
                   {"role":"user","content":prompt}],
         result_format="message",
@@ -940,6 +1056,11 @@ def response(audio: tuple[int, np.ndarray], *args):
         elif len(args) == 1: stage_id, diff_id, voice_id = args[0], DEFAULT_DIFFICULTY_ID, DEFAULT_VOICE_ID
         else: stage_id, diff_id, voice_id = DEFAULT_STAGE_ID, DEFAULT_DIFFICULTY_ID, DEFAULT_VOICE_ID
         s, d, v = stage_id or DEFAULT_STAGE_ID, diff_id or DEFAULT_DIFFICULTY_ID, voice_id or DEFAULT_VOICE_ID
+        active_selection = get_active_stream_selection()
+        s = active_selection.get("stage_id") or s
+        d = active_selection.get("difficulty_id") or d
+        v = active_selection.get("voice_id") or v
+        active_case_id = str(active_selection.get("case_id") or "")
 
         audio_duration_s = _audio_duration_s(audio)
         timings.update(_audio_level_metrics(audio))
@@ -950,7 +1071,7 @@ def response(audio: tuple[int, np.ndarray], *args):
             audio_bytes=0,
             audio_duration_s=audio_duration_s,
             audio_sample_rate=audio[0],
-            training={"stage_id": s, "difficulty_id": d, "voice_id": v},
+            training={"stage_id": s, "difficulty_id": d, "voice_id": v, "case_id": active_case_id},
             timings=timings,
         )
 
@@ -963,7 +1084,7 @@ def response(audio: tuple[int, np.ndarray], *args):
             response_text="",
             audio_bytes=0,
             audio_duration_s=audio_duration_s,
-            training={"stage_id": s, "difficulty_id": d, "voice_id": v},
+            training={"stage_id": s, "difficulty_id": d, "voice_id": v, "case_id": active_case_id},
             timings=timings,
         )
 
@@ -991,18 +1112,51 @@ def response(audio: tuple[int, np.ndarray], *args):
         timings["asr_s"] = _round_time(asr_start)
 
         if asr_error:
-            set_status("asr_error", error=asr_error, timings=timings)
+            notice = ASR_ERROR_NOTICE
+            tts_start = time.perf_counter()
+            voice_cfg = resolve_voice(v)
+            ab = synthesize_with_retry(notice, voice_cfg)
+            timings["tts_s"] = _round_time(tts_start)
+            timings["total_s"] = _round_time(overall_start)
+            set_status(
+                "asr_error",
+                error=_friendly_asr_error(asr_error),
+                response_text=notice,
+                audio_bytes=len(ab),
+                timings=timings,
+            )
+            yield (24000, np.frombuffer(ab, dtype=np.int16).reshape(1, -1))
             return
         timings["prompt_chars"] = len(prompt)
         if not prompt:
-            set_status("asr_empty", audio_duration_s=audio_duration_s, timings=timings)
+            notice = ASR_EMPTY_NOTICE
+            tts_start = time.perf_counter()
+            voice_cfg = resolve_voice(v)
+            ab = synthesize_with_retry(notice, voice_cfg)
+            timings["tts_s"] = _round_time(tts_start)
+            timings["total_s"] = _round_time(overall_start)
+            set_status(
+                "asr_empty",
+                audio_duration_s=audio_duration_s,
+                response_text=notice,
+                audio_bytes=len(ab),
+                timings=timings,
+            )
+            yield (24000, np.frombuffer(ab, dtype=np.int16).reshape(1, -1))
             return
         set_status("asr_done", prompt=prompt, audio_duration_s=audio_duration_s, timings=timings)
 
         # 3. LLM (JSONL case session + state machine + guardrails)
         prompt_start = time.perf_counter()
         session_key = _stream_session_key(args, s, d)
-        training_prompt, training_summary, session_context = _build_session_training_prompt(session_key, s, d)
+        if active_case_id:
+            session_key = f"{session_key}-{active_case_id}"
+        training_prompt, training_summary, session_context = _build_session_training_prompt(
+            session_key,
+            s,
+            d,
+            preferred_case_id=active_case_id or None,
+        )
         voice_cfg = resolve_voice(v)
         st = {**training_summary, "voice_id": v, "voice": voice_cfg.get("label",v), "session_id": session_key}
         raw_mem = get_recent_memory(session_key, limit=10)
@@ -1014,7 +1168,7 @@ def response(audio: tuple[int, np.ndarray], *args):
         set_status("loaded", prompt=prompt, training=st, timings=timings)
 
         qwen_start = time.perf_counter()
-        resp = Generation.call(model=os.getenv("DASHSCOPE_LLM_MODEL","qwen-plus"),
+        resp = Generation.call(model=os.getenv("DASHSCOPE_LLM_MODEL","qwen3.6-plus"),
             messages=[{"role":"system","content":f"{training_prompt}\n\n{mem_prompt}\n\n{guard_prompt}\n\n{quality_prompt}"},
                       {"role":"user","content":prompt}],
             result_format="message",

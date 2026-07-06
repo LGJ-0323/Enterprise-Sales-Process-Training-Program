@@ -223,7 +223,7 @@ def response(
 
         # 5. LLM
         qwen_response = Generation.call(
-            model=os.getenv("DASHSCOPE_LLM_MODEL", "qwen-turbo"),
+            model=os.getenv("DASHSCOPE_LLM_MODEL", "qwen3.6-plus"),
             messages=[
                 {"role": "system", "content": f"{load_customer_profile()}\n\n{training_prompt}"},
                 {"role": "user", "content": prompt},

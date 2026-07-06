@@ -1,4 +1,24 @@
+"""
+app_new_wechat.py — 移动 H5 录音上传版训练入口
+
+FastAPI 应用，提供移动 H5 页面和后端接口：
+- /mobile:          H5 录音训练页面（浏览器录音 → 上传 → ASR → LLM → TTS → 播放）
+- /realtime:        实时 WebSocket 语音模式入口（重定向到 WebSocket 页面）
+- /api/training/config:   获取训练配置（阶段、难度、音色选项）
+- /api/training/voice-turn: 处理录音上传，返回客户回复文本和音频
+- /ws/audio-probe:  WebSocket 音频探针（最小验证）
+- /ws/voice:        WebSocket 完整实时语音管道
+
+与桌面版（app_new_web）的区别：
+- 桌面版使用 WebRTC 实时流，适合 PC 浏览器
+- 移动版使用录音上传模式，适合手机 H5 / 企业微信
+"""
+
 from __future__ import annotations
+from starlette.websockets import WebSocket, WebSocketDisconnect
+from starlette.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+import uvicorn
 
 import base64
 import os
@@ -7,10 +27,6 @@ from pathlib import Path
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from starlette.responses import HTMLResponse, RedirectResponse
-from starlette.websockets import WebSocket, WebSocketDisconnect
 
 try:
     from .voice_ws import handle_audio_probe, handle_voice_ws
@@ -582,7 +598,8 @@ async def voice_turn(
         audio_bytes = await audio.read()
         if not audio_bytes:
             raise HTTPException(status_code=400, detail="没有收到录音。")
-        prompt = transcribe_uploaded_audio(audio_bytes, audio.filename or "recording.webm")
+        prompt = transcribe_uploaded_audio(
+            audio_bytes, audio.filename or "recording.webm")
         turn = run_customer_turn(
             prompt=prompt,
             stage_id=stage_id,
@@ -590,7 +607,8 @@ async def voice_turn(
             voice_id=voice_id,
             session_id=session_id,
         )
-        wav_bytes = pcm_to_wav_bytes(turn["audio_bytes"], int(turn.get("sample_rate") or 24000))
+        wav_bytes = pcm_to_wav_bytes(
+            turn["audio_bytes"], int(turn.get("sample_rate") or 24000))
         return {
             "ok": True,
             "prompt": turn["prompt"],
@@ -604,7 +622,8 @@ async def voice_turn(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
 
 
 @app.get("/debug/status")
@@ -1059,5 +1078,6 @@ async def realtime_page():
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("APP_PORT", "8511"))
-    uvicorn.run(app, host="127.0.0.1", port=port, reload=False)
+    host = os.getenv("WECHAT_APP_HOST", "127.0.0.1")
+    port = int(os.getenv("WECHAT_APP_PORT", "8511"))
+    uvicorn.run(app, host=host, port=port, reload=False)
