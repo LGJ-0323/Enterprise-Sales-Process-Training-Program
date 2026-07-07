@@ -52,6 +52,7 @@ try:
     from .training_config import resolve_training, _label
     from .case_loader import get_case, find_cases, case_count as get_case_count
     from .training_data_context import summarize_case_assets
+    from .conversation_store import recent_completed_sessions
 except ImportError:
     from conversation_store import get_session, get_session_turns
     from fastrtc_new_web import (
@@ -70,34 +71,41 @@ except ImportError:
     from training_config import resolve_training, _label
     from case_loader import get_case, find_cases, case_count as get_case_count
     from training_data_context import summarize_case_assets
+    from conversation_store import recent_completed_sessions
 
 
 BASE_DIR = Path(__file__).resolve().parent
+TEMPLATES_DIR = BASE_DIR / "templates"
+
+
+def _render_template(name: str) -> HTMLResponse:
+    """读取 core/templates/ 下的 HTML 模板并返回。"""
+    path = TEMPLATES_DIR / f"{name}.html"
+    if not path.exists():
+        raise HTTPException(404, f"模板 {name} 不存在")
+    return HTMLResponse(path.read_text(encoding="utf-8"))
+
 
 app = FastAPI(title="Mobile H5 Training Prototype")
 
 
+# 注：MOBILE_HTML / REALTIME_HTML 已迁移至 core/templates/ 目录
+# 下方为历史遗留的内嵌 HTML 字符串，不再使用但保留以避免大范围行号偏移
 MOBILE_HTML = """
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>雄达物流客户陪练</title>
-  <style>
-    :root {
+
+    : root {
       color-scheme: light;
-      --bg: #f6f7f9;
-      --panel: #ffffff;
-      --ink: #172033;
-      --muted: #667085;
-      --line: #d9dee8;
-      --brand: #007a78;
-      --brand-dark: #065f5d;
-      --warn: #b42318;
-      --soft: #eef7f6;
+      --bg:  # f6f7f9;
+      --panel:  # ffffff;
+      --ink:  # 172033;
+      --muted:  # 667085;
+      --line:  # d9dee8;
+      --brand:  # 007a78;
+      --brand-dark:  # 065f5d;
+      --warn:  # b42318;
+      --soft:  # eef7f6;
     }
-    * { box-sizing: border-box; }
+    * {box-sizing: border-box; }
     body {
       margin: 0;
       min-height: 100vh;
@@ -143,16 +151,16 @@ MOBILE_HTML = """
       gap: 5px;
       font-size: 13px;
       font-weight: 650;
-      color: #344054;
+      color:  # 344054;
     }
     select {
-      width: 100%;
+      width: 100 %;
       min-height: 42px;
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 0 10px;
       font-size: 15px;
-      background: #fff;
+      background:  # fff;
       color: var(--ink);
     }
     .recorder {
@@ -165,15 +173,15 @@ MOBILE_HTML = """
       height: 132px;
       margin: 6px auto 0;
       border: 0;
-      border-radius: 50%;
+      border-radius: 50 %;
       background: var(--brand);
-      color: #fff;
+      color:  # fff;
       font-size: 17px;
       font-weight: 750;
       box-shadow: 0 10px 24px rgba(0, 122, 120, 0.28);
       touch-action: manipulation;
     }
-    .record-btn:disabled {
+    .record-btn: disabled {
       opacity: .62;
       box-shadow: none;
     }
@@ -183,13 +191,13 @@ MOBILE_HTML = """
     }
     .play-btn {
       display: none;
-      width: min(100%, 260px);
+      width: min(100 %, 260px);
       min-height: 46px;
       margin: 0 auto;
       border: 0;
       border-radius: 8px;
-      background: #172033;
-      color: #fff;
+      background:  # 172033;
+      color:  # fff;
       font-size: 15px;
       font-weight: 720;
     }
@@ -219,15 +227,15 @@ MOBILE_HTML = """
       line-height: 1.55;
       font-size: 15px;
       border: 1px solid var(--line);
-      background: #fff;
+      background:  # fff;
       text-align: left;
     }
     .bubble.user {
-      background: #f9fafb;
+      background:  # f9fafb;
     }
     .bubble.customer {
       background: var(--soft);
-      border-color: #b8ddda;
+      border-color:  # b8ddda;
     }
     .bubble-title {
       margin-bottom: 4px;
@@ -236,7 +244,7 @@ MOBILE_HTML = """
       color: var(--brand-dark);
     }
     audio {
-      width: 100%;
+      width: 100 %;
       margin-top: 2px;
     }
     .error {
@@ -588,7 +596,7 @@ async def index():
 
 @app.get("/mobile")
 async def mobile_page():
-    return HTMLResponse(MOBILE_HTML)
+    return _render_template("mobile")
 
 
 @app.get("/api/training/config")
@@ -797,9 +805,12 @@ REALTIME_HTML = """<!doctype html>
   .bubble { padding: 10px 12px; border-radius: 8px; line-height: 1.55; font-size: 15px; border: 1px solid var(--line); background: #fff; text-align: left; }
   .bubble.user { background: #f9fafb; }
   .bubble.customer { background: var(--soft); border-color: #b8ddda; }
+  .bubble.customer.guardrail { border-color: #f59e0b; border-width: 2px; }
+  .guardrail-note { font-size: 11px; color: #b45309; margin-top: 4px; font-weight: 650; }
   .bubble-title { margin-bottom: 4px; font-size: 12px; font-weight: 760; color: var(--brand-dark); }
   .ws-indicator { font-size: 11px; color: var(--muted); text-align: center; margin-top: 4px; }
   .interim { font-size: 13px; color: var(--muted); font-style: italic; padding: 4px 0; min-height: 20px; }
+  .tts-indicator { font-size: 13px; color: #3538cd; font-weight: 650; padding: 2px 0; min-height: 20px; text-align: center; }
   .error { color: var(--warn); white-space: pre-wrap; font-size: 13px; }
   .tip-box { background: #fffaeb; border: 1px solid #fedf89; border-radius: 8px; padding: 10px 14px; font-size: 13px; color: #b54708; }
   /* ── 客户画像 + 训练目标卡片 ── */
@@ -847,7 +858,30 @@ REALTIME_HTML = """<!doctype html>
   .state-toast.show { opacity: 1; }
   /* ── 会话信息栏 ── */
   .session-info { display: none; font-size: 11px; color: var(--muted); text-align: center; padding: 4px 0; }
-  .session-info.show { display: block; }</style>
+  .session-info.show { display: block; }
+  /* ── 训练记录 ── */
+  .history-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-top: 4px; }
+  .history-panel .panel-header { padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 14px; font-weight: 750; color: var(--ink); display: flex; justify-content: space-between; }
+  .history-panel .panel-header .reload-btn { font-size: 12px; color: var(--brand); cursor: pointer; background: none; border: none; }
+  .history-item { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid #f0f0f0; cursor: pointer; font-size: 13px; }
+  .history-item:last-child { border-bottom: 0; }
+  .history-item:hover { background: #f8fafb; }
+  .history-item .hi-score { width: 36px; height: 36px; border-radius: 8px; display: grid; place-items: center; font-weight: 800; font-size: 14px; flex-shrink: 0; }
+  .history-item .hi-score.good { background: #ecfdf3; color: #027a48; }
+  .history-item .hi-score.mid { background: #fffaeb; color: #b54708; }
+  .history-item .hi-score.low { background: #fef3f2; color: #b42318; }
+  .history-item .hi-info { flex: 1; min-width: 0; }
+  .history-item .hi-info .hi-title { font-weight: 700; margin-bottom: 2px; }
+  .history-item .hi-info .hi-meta { font-size: 11px; color: var(--muted); }
+  .history-empty { padding: 20px 14px; text-align: center; color: var(--muted); font-size: 13px; }
+  /* ── 对话详情弹层 ── */
+  .detail-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: flex-end; }
+  .detail-overlay.show { display: flex; }
+  .detail-sheet { width: 100%; max-width: 640px; max-height: 75vh; background: #fff; border-radius: 14px 14px 0 0; overflow-y: auto; padding: 16px; }
+  .detail-sheet .detail-close { float: right; width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--line); background: #fff; font-size: 16px; cursor: pointer; line-height: 26px; text-align: center; }
+  .detail-turn { padding: 8px 0; border-bottom: 1px solid #f0f0f0; font-size: 13px; line-height: 1.5; }
+  .detail-turn .dt-role { font-weight: 750; color: var(--brand-dark); }
+  .detail-turn .dt-text { margin-top: 2px; }</style>
 </head>
 <body>
 <main class="app">
@@ -901,6 +935,7 @@ REALTIME_HTML = """<!doctype html>
 
   <!-- ASR 中间文本 -->
   <div class="interim" id="interim"></div>
+  <div class="tts-indicator" id="ttsIndicator"></div>
 
   <!-- 操作按钮 -->
   <button class="action-btn" id="actionBtn" type="button">开始对话</button>
@@ -929,6 +964,20 @@ REALTIME_HTML = """<!doctype html>
       <div class="feedback-section" id="feedbackSection"></div>
     </div>
   </section>
+
+  <!-- 训练记录 -->
+  <section class="history-panel" id="historyPanel">
+    <div class="panel-header">
+      <span>训练记录</span>
+      <button class="reload-btn" onclick="loadHistory()">刷新</button>
+    </div>
+    <div id="historyList"><div class="history-empty">加载中...</div></div>
+  </section>
+
+  <!-- 对话详情弹层 -->
+  <div class="detail-overlay" id="detailOverlay" onclick="if(event.target===this)closeDetail()">
+    <div class="detail-sheet" id="detailSheet"></div>
+  </div>
 
   <!-- 会话信息栏 -->
   <div class="session-info" id="sessionInfo"></div>
@@ -959,6 +1008,7 @@ const els = {
   scoringPanel: $("scoringPanel"), scoreBig: $("scoreBig"), scoreLabel: $("scoreLabel"),
   dimBars: $("dimBars"), feedbackSection: $("feedbackSection"),
   stateToast: $("stateToast"), sessionInfo: $("sessionInfo"),
+  ttsIndicator: $("ttsIndicator"),
 };
 
 // ═══════════════════════════════════════════════════
@@ -967,7 +1017,19 @@ const els = {
 const REQUESTED_SAMPLE_RATE = 16000;
 const CHUNK_MS = 100;
 const CHUNK_SAMPLES = Math.floor(REQUESTED_SAMPLE_RATE * CHUNK_MS / 1000);
-const SCRIPT_BUFFER_SIZE = 2048;
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+const IS_WECOM = /wxwork/i.test(navigator.userAgent);
+const USE_TTS_WHOLE_UTTERANCE = false;
+const SCRIPT_BUFFER_SIZE = IS_IOS ? 1024 : 2048;
+const WS_BUFFER_HIGH_WATERMARK = IS_IOS ? 262144 : 131072;
+const TTS_SAMPLE_RATE = 24000;
+const TTS_SCHEDULE_LEAD_S = IS_IOS ? 0.06 : 0.03;
+const TTS_PREBUFFER_CHUNKS = (IS_IOS || IS_WECOM) ? 5 : 1;
+const TTS_PREBUFFER_S = (IS_IOS || IS_WECOM) ? 0.75 : 0.0;
+const CLIENT_RMS_GATE = IS_IOS ? 0.0045 : 0.0025;
+const CLIENT_SPEECH_GATE = IS_IOS ? 0.009 : 0.0045;
+const CLIENT_SILENCE_FLUSH_MS = IS_IOS ? 560 : 550;
+const CLIENT_MIN_SPEECH_MS = IS_IOS ? 420 : 320;
 
 let ws = null;
 let audioCtx = null;
@@ -975,10 +1037,24 @@ let stream = null;
 let active = false;
 let currentStage = "idle";
 let lastLevelUpdateAt = 0;
+let wsReconnectCount = 0;
+const WS_MAX_RECONNECT = 5;
+let errorRecoveryTimer = null;
 let sessionId = `ws-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+let clientSpeechActive = false;
+let clientFlushSent = false;
+let clientSpeechStartedAt = 0;
+let clientLastVoiceAt = 0;
 
 function getInputSampleRate() {
   return Math.round((audioCtx && audioCtx.sampleRate) || REQUESTED_SAMPLE_RATE);
+}
+
+function resetClientSpeechState() {
+  clientSpeechActive = false;
+  clientFlushSent = false;
+  clientSpeechStartedAt = 0;
+  clientLastVoiceAt = 0;
 }
 
 // ═══════════════════════════════════════════════════
@@ -992,9 +1068,9 @@ function setStatus(stage, text) {
   txt.textContent = text;
 }
 
-function addBubble(type, title, text) {
+function addBubble(type, title, text, extraClass) {
   const b = document.createElement("div");
-  b.className = `bubble ${type}`;
+  b.className = `bubble ${type}${extraClass ? " " + extraClass : ""}`;
   const h = document.createElement("div");
   h.className = "bubble-title"; h.textContent = title;
   const body = document.createElement("div");
@@ -1039,6 +1115,14 @@ function renderGoal(msg) {
   const critical = (msg.critical || []).slice(0, 2).map(s => `🚫 ${s}`).join(" ");
   els.goalMust.innerHTML = must;
   els.goalCritical.innerHTML = critical;
+  // 场景化开场白：替换初始客户气泡
+  if (msg.opening) {
+    const firstBubble = els.conversation.querySelector(".bubble.customer");
+    if (firstBubble) {
+      const body = firstBubble.querySelector(".bubble-title");
+      if (body && body.nextSibling) body.nextSibling.textContent = msg.opening;
+    }
+  }
 }
 
 function showStateChangeToast(msg) {
@@ -1059,6 +1143,17 @@ function renderEvaluation(msg) {
       const pct = d.max ? Math.round(d.score * 100 / d.max) : d.score;
       return `<div class="dim-row"><span class="dim-name">${d.name}</span><div class="dim-track"><div class="dim-fill" style="width:${pct}%"></div></div><span class="dim-pct">${pct}%</span></div>`;
     }).join("");
+  } else {
+    els.dimBars.innerHTML = "";
+  }
+  // 文字反馈（LLM score_notes + triggered_events）
+  const notes = msg.score_notes || {};
+  const events = msg.triggered_events || [];
+  const lines = [];
+  Object.entries(notes).forEach(([k, v]) => { if (v) lines.push(`<strong>${k}</strong>：${v}`); });
+  if (events.length > 0) lines.push(`触发：${events.join("、")}`);
+  if (lines.length > 0 && dims.length === 0) {
+    els.feedbackSection.innerHTML = lines.map(l => `<div class="fb-item note"><span>${l}</span></div>`).join("");
   }
   els.scoringPanel.classList.add("show");
 }
@@ -1087,6 +1182,8 @@ function updateSessionInfo(msg) {
 }
 
 function resetPanels() {
+  resetTtsPlayback(true);
+  resetClientSpeechState();
   els.personaGoalCard.classList.remove("show");
   els.personaName.textContent = "等待中...";
   els.personaMeta.textContent = "";
@@ -1108,39 +1205,211 @@ function resetPanels() {
 // ═══════════════════════════════════════════════════
 const playQueue = [];
 let playing = false;
+let nextTtsStartAt = 0;
+const activeTtsSources = new Set();
+let ttsStreamOpen = false;
+let ttsStreamDone = false;
+const ttsWholeChunks = [];
 
 function enqueueAudio(pcm16Buffer) {
+  if (USE_TTS_WHOLE_UTTERANCE) {
+    ttsWholeChunks.push(pcm16Buffer);
+    updateTtsIndicator();
+    return;
+  }
   playQueue.push(pcm16Buffer);
-  if (!playing) drainQueue();
+  drainQueue();
+}
+
+function updateTtsIndicator() {
+  if (playing) {
+    els.ttsIndicator.textContent = "🔊 客户语音播放中";
+    return;
+  }
+  if (ttsStreamOpen && !ttsStreamDone && (playQueue.length > 0 || ttsWholeChunks.length > 0)) {
+    els.ttsIndicator.textContent = "🔊 客户语音缓冲中";
+    return;
+  }
+  els.ttsIndicator.textContent = "";
 }
 
 let ttsGainNode = null;
 
-function drainQueue() {
-  if (playQueue.length === 0) { playing = false; return; }
+function ensureTtsGainNode() {
+  if (!audioCtx) return false;
+  if (!ttsGainNode) {
+    ttsGainNode = audioCtx.createGain();
+    ttsGainNode.gain.value = 0.9;
+    ttsGainNode.connect(audioCtx.destination);
+  }
+  return true;
+}
+
+function queuedTtsDurationS() {
+  return playQueue.reduce((sum, buf) => sum + (buf.length / TTS_SAMPLE_RATE), 0);
+}
+
+function mergePcmChunks(chunks) {
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const merged = new Int16Array(totalLength);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return merged;
+}
+
+function playScheduledBuffer(int16Buffer) {
+  if (!audioCtx || !ensureTtsGainNode() || int16Buffer.length === 0) return false;
+  if (audioCtx.state === "suspended") {
+    audioCtx.resume().catch((e) => console.warn("resume audioCtx failed", e));
+  }
+  const float32 = new Float32Array(int16Buffer.length);
+  for (let i = 0; i < int16Buffer.length; i++) float32[i] = int16Buffer[i] / 32768;
+  const audioBuffer = audioCtx.createBuffer(1, float32.length, TTS_SAMPLE_RATE);
+  audioBuffer.getChannelData(0).set(float32);
+  const src = audioCtx.createBufferSource();
+  src.buffer = audioBuffer;
+  src.connect(ttsGainNode);
+  const startAt = Math.max(audioCtx.currentTime + TTS_SCHEDULE_LEAD_S, nextTtsStartAt || 0);
+  nextTtsStartAt = startAt + audioBuffer.duration;
   playing = true;
-  const buf = playQueue.shift();
-  try {
-    if (!audioCtx) return;
-    // 懒初始化 TTS 增益节点
-    if (!ttsGainNode) {
-      ttsGainNode = audioCtx.createGain();
-      ttsGainNode.gain.value = 0.9;
-      ttsGainNode.connect(audioCtx.destination);
+  updateTtsIndicator();
+  activeTtsSources.add(src);
+  src.onended = () => {
+    activeTtsSources.delete(src);
+    if (activeTtsSources.size === 0) {
+      playing = false;
+      nextTtsStartAt = 0;
+      if (ttsStreamDone) {
+        ttsStreamOpen = false;
+        ttsStreamDone = false;
+        if (active) setStatus("listening", "继续说话");
+      }
+      updateTtsIndicator();
     }
-    const sampleRate = audioCtx.sampleRate || 24000;
-    const float32 = new Float32Array(buf.length);
-    for (let i = 0; i < buf.length; i++) float32[i] = buf[i] / 32768;
-    const ab = audioCtx.createBuffer(1, float32.length, 24000);
-    ab.getChannelData(0).set(float32);
-    const src = audioCtx.createBufferSource();
-    src.buffer = ab;
-    src.connect(ttsGainNode);
-    src.onended = drainQueue;
-    src.start();
+  };
+  src.start(startAt);
+  return true;
+}
+
+function beginTtsStream() {
+  resetTtsPlayback(true);
+  ttsStreamOpen = true;
+  ttsStreamDone = false;
+  updateTtsIndicator();
+}
+
+function finishTtsStream() {
+  ttsStreamDone = true;
+  if (USE_TTS_WHOLE_UTTERANCE) {
+    if (ttsWholeChunks.length > 0) {
+      const merged = mergePcmChunks(ttsWholeChunks);
+      ttsWholeChunks.length = 0;
+      playScheduledBuffer(merged);
+    } else if (!playing) {
+      ttsStreamOpen = false;
+      ttsStreamDone = false;
+      if (active) setStatus("listening", "继续说话");
+      updateTtsIndicator();
+    }
+    return;
+  }
+  drainQueue();
+  if (!playing && playQueue.length === 0 && activeTtsSources.size === 0) {
+    ttsStreamOpen = false;
+    setStatus("listening", "继续说话");
+    updateTtsIndicator();
+  }
+}
+
+function resetTtsPlayback(hardStop = false) {
+  if (hardStop) {
+    activeTtsSources.forEach((src) => {
+      try {
+        src.onended = null;
+        src.stop(0);
+      } catch (e) {
+        console.warn("stop playback error", e);
+      }
+    });
+    activeTtsSources.clear();
+  }
+  playQueue.length = 0;
+  ttsWholeChunks.length = 0;
+  playing = false;
+  nextTtsStartAt = 0;
+  ttsStreamOpen = false;
+  ttsStreamDone = false;
+  updateTtsIndicator();
+}
+
+function drainQueue() {
+  try {
+    if (USE_TTS_WHOLE_UTTERANCE) {
+      updateTtsIndicator();
+      return;
+    }
+    if (!audioCtx || !ensureTtsGainNode()) return;
+    if (audioCtx.state === "suspended") {
+      audioCtx.resume().catch((e) => console.warn("resume audioCtx failed", e));
+    }
+    if (playQueue.length === 0) {
+      if (activeTtsSources.size === 0) {
+        playing = false;
+        nextTtsStartAt = 0;
+        if (ttsStreamDone) {
+          ttsStreamOpen = false;
+          ttsStreamDone = false;
+          if (active) setStatus("listening", "继续说话");
+        }
+        updateTtsIndicator();
+      }
+      return;
+    }
+    if (!playing && !ttsStreamDone) {
+      if (playQueue.length < TTS_PREBUFFER_CHUNKS && queuedTtsDurationS() < TTS_PREBUFFER_S) {
+        updateTtsIndicator();
+        return;
+      }
+    }
+    const now = audioCtx.currentTime;
+    if (!nextTtsStartAt || nextTtsStartAt < now + TTS_SCHEDULE_LEAD_S) {
+      nextTtsStartAt = now + TTS_SCHEDULE_LEAD_S;
+    }
+    playing = true;
+    updateTtsIndicator();
+    while (playQueue.length > 0) {
+      const buf = playQueue.shift();
+      const float32 = new Float32Array(buf.length);
+      for (let i = 0; i < buf.length; i++) float32[i] = buf[i] / 32768;
+      const audioBuffer = audioCtx.createBuffer(1, float32.length, TTS_SAMPLE_RATE);
+      audioBuffer.getChannelData(0).set(float32);
+      const src = audioCtx.createBufferSource();
+      src.buffer = audioBuffer;
+      src.connect(ttsGainNode);
+      const scheduledStartAt = nextTtsStartAt;
+      nextTtsStartAt = scheduledStartAt + audioBuffer.duration;
+      activeTtsSources.add(src);
+      src.onended = () => {
+        activeTtsSources.delete(src);
+        if (activeTtsSources.size === 0 && playQueue.length === 0) {
+          playing = false;
+          nextTtsStartAt = 0;
+          if (ttsStreamDone) {
+            ttsStreamOpen = false;
+            ttsStreamDone = false;
+            if (active) setStatus("listening", "继续说话");
+          }
+          updateTtsIndicator();
+        }
+      };
+      src.start(scheduledStartAt);
+    }
   } catch (e) {
     console.warn("playback error", e);
-    drainQueue();
+    resetTtsPlayback(true);
   }
 }
 
@@ -1150,7 +1419,7 @@ function drainQueue() {
 async function unlockAudio() {
   if (!audioCtx) {
     const AC = window.AudioContext || window.webkitAudioContext;
-    audioCtx = new AC();
+    audioCtx = new AC({ latencyHint: "interactive" });
   }
   if (audioCtx.state === "suspended") {
     await audioCtx.resume();
@@ -1180,7 +1449,7 @@ async function startMic() {
 
   if (!audioCtx) {
     const AC = window.AudioContext || window.webkitAudioContext;
-    audioCtx = new AC({ sampleRate: REQUESTED_SAMPLE_RATE });
+    audioCtx = new AC({ latencyHint: "interactive", sampleRate: REQUESTED_SAMPLE_RATE });
   }
 
   const source = audioCtx.createMediaStreamSource(stream);
@@ -1193,15 +1462,36 @@ async function startMic() {
     let sumSq = 0;
     for (let i = 0; i < input.length; i++) sumSq += input[i] * input[i];
     const rms = Math.sqrt(sumSq / input.length);
+    const now = Date.now();
+    if (rms >= CLIENT_RMS_GATE) {
+      if (!clientSpeechActive) {
+        clientSpeechActive = true;
+        clientFlushSent = false;
+        clientSpeechStartedAt = now;
+      }
+      if (rms >= CLIENT_SPEECH_GATE) {
+        clientLastVoiceAt = now;
+      }
+    } else if (
+      clientSpeechActive &&
+      !clientFlushSent &&
+      currentStage === "listening" &&
+      now - clientLastVoiceAt >= CLIENT_SILENCE_FLUSH_MS &&
+      now - clientSpeechStartedAt >= CLIENT_MIN_SPEECH_MS
+    ) {
+      clientFlushSent = true;
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "control", action: "flush" }));
+      }
+    }
     // 环境底噪跳过，减少服务端无效处理
-    if (rms < 0.0025) return;
+    if (rms < CLIENT_RMS_GATE) return;
     // PCM 转换（稍降增益，减少削波）
     const gain = 0.85;
     const int16 = new Int16Array(input.length);
     for (let i = 0; i < input.length; i++) {
       int16[i] = Math.max(-32768, Math.min(32767, input[i] * 32768 * gain));
     }
-    const now = Date.now();
     if (currentStage === "listening" && now - lastLevelUpdateAt > 250) {
       const bars = Math.min(10, Math.round(rms * 180));
       els.interim.textContent = bars > 0
@@ -1209,7 +1499,7 @@ async function startMic() {
         : "正在听你说话...";
       lastLevelUpdateAt = now;
     }
-    if (ws.bufferedAmount < 65536) {
+    if (ws.bufferedAmount < WS_BUFFER_HIGH_WATERMARK) {
       ws.send(int16.buffer);
     }
   };
@@ -1223,6 +1513,7 @@ async function startMic() {
 }
 
 function stopMic() {
+  resetClientSpeechState();
   if (scriptProcessor) {
     scriptProcessor.disconnect();
     scriptProcessor = null;
@@ -1249,6 +1540,8 @@ function connectWS() {
 
   ws.onopen = () => {
     els.wsIndicator.textContent = "🔗 WebSocket 已连接";
+    wsReconnectCount = 0;
+    resetClientSpeechState();
     ws.send(JSON.stringify({
       type: "control", action: "start",
       session_id: sessionId,
@@ -1276,10 +1569,14 @@ function connectWS() {
   };
 
   ws.onclose = () => {
-    els.wsIndicator.textContent = "⚠️ WebSocket 断开";
-    if (active) {
-      setStatus("idle", "连接断开，尝试重连...");
-      setTimeout(() => { if (active) connectWS(); }, 2000);
+    wsReconnectCount++;
+    els.wsIndicator.textContent = `⚠️ WebSocket 断开 (${wsReconnectCount}/${WS_MAX_RECONNECT})`;
+    if (active && wsReconnectCount <= WS_MAX_RECONNECT) {
+      setStatus("idle", `连接断开，${2 * wsReconnectCount}s 后重连...`);
+      setTimeout(() => { if (active) connectWS(); }, Math.min(2000 * wsReconnectCount, 10000));
+    } else if (active) {
+      setStatus("error", "连接失败，请点击重试");
+      els.wsIndicator.innerHTML = '<button onclick="if(active){wsReconnectCount=0;connectWS();}" style="font-size:12px;padding:2px 8px;border:1px solid var(--line);border-radius:4px;background:#fff;cursor:pointer;">重新连接</button>';
     }
   };
 
@@ -1294,6 +1591,12 @@ function handleWSMessage(msg) {
       els.wsIndicator.textContent = `✅ 已就绪 (SR: ${msg.sample_rate_in}Hz → ${msg.sample_rate_out}Hz)`;
       break;
     case "status":
+      if (msg.stage === "processing" || msg.stage === "speaking" || msg.stage === "idle") {
+        resetClientSpeechState();
+      }
+      if (msg.stage === "speaking") {
+        beginTtsStream();
+      }
       setStatus(msg.stage || "idle", msg.detail || msg.stage || "");
       break;
     case "persona":
@@ -1303,14 +1606,21 @@ function handleWSMessage(msg) {
       renderGoal(msg);
       break;
     case "asr_final":
+      resetClientSpeechState();
       els.interim.textContent = "";
       addBubble("user", "我", msg.text);
       break;
     case "response_text":
-      addBubble("customer", "客户", msg.text);
+      addBubble("customer", "客户", msg.text, msg.guardrail ? "guardrail" : null);
+      if (msg.guardrail) {
+        const note = document.createElement("div");
+        note.className = "guardrail-note";
+        note.textContent = "⚠ 系统已纠偏";
+        els.conversation.lastChild.appendChild(note);
+      }
       break;
     case "tts_done":
-      setStatus("listening", "继续说话");
+      finishTtsStream();
       break;
     case "evaluation":
       renderEvaluation(msg);
@@ -1330,9 +1640,14 @@ function handleWSMessage(msg) {
       els.actionBtn.textContent = "开始对话";
       els.actionBtn.classList.remove("stop");
       stopMic();
+      loadHistory();
       break;
     case "error":
       setStatus("error", msg.message);
+      if (errorRecoveryTimer) clearTimeout(errorRecoveryTimer);
+      errorRecoveryTimer = setTimeout(() => {
+        if (active) setStatus("listening", "已恢复，可继续说");
+      }, 3000);
       break;
   }
 }
@@ -1346,6 +1661,7 @@ els.actionBtn.addEventListener("click", async () => {
     active = false;
     if (ws) ws.send(JSON.stringify({ type: "control", action: "end" }));
     stopMic();
+    resetTtsPlayback(true);
     setStatus("idle", "已停止");
     els.actionBtn.textContent = "开始对话";
     els.actionBtn.classList.remove("stop");
@@ -1371,6 +1687,114 @@ els.actionBtn.addEventListener("click", async () => {
 });
 
 // ═══════════════════════════════════════════════════
+//  训练记录
+// ═══════════════════════════════════════════════════
+els.historyList = $("historyList");
+els.detailOverlay = $("detailOverlay");
+els.detailSheet = $("detailSheet");
+
+function scoreClass(score) {
+  if (score == null) return "low";
+  if (score >= 80) return "good";
+  if (score >= 60) return "mid";
+  return "low";
+}
+
+async function loadHistory() {
+  try {
+    const res = await fetch("/api/training/history?limit=10");
+    const data = await res.json();
+    if (!data.length) {
+      els.historyList.innerHTML = '<div class="history-empty">暂无训练记录，完成一次陪练后会自动出现在这里</div>';
+      return;
+    }
+    els.historyList.innerHTML = data.map(s => {
+      const sc = s.score != null ? s.score : "?";
+      const cls = scoreClass(s.score);
+      const time = (s.completed_at || "").slice(0, 10) || "—";
+      const result = s.is_success ? "✓ 成功" : s.final_state || "已结束";
+      return `<div class="history-item" onclick="showSessionDetail('${s.session_id}')">
+        <div class="hi-score ${cls}">${sc}</div>
+        <div class="hi-info">
+          <div class="hi-title">${s.stage || "训练"} · ${s.difficulty || ""}</div>
+          <div class="hi-meta">${time} · ${s.turn_count || 0} 轮 · ${result}</div>
+        </div>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    els.historyList.innerHTML = '<div class="history-empty">加载失败，请刷新</div>';
+  }
+}
+
+async function showSessionDetail(sessionId) {
+  els.detailSheet.textContent = "";
+  const loading = document.createElement("div");
+  loading.className = "history-empty";
+  loading.textContent = "加载中...";
+  els.detailSheet.appendChild(loading);
+  els.detailOverlay.classList.add("show");
+  try {
+    const res = await fetch(`/api/training/session-turns?session_id=${encodeURIComponent(sessionId)}`);
+    const turns = await res.json();
+    els.detailSheet.textContent = "";
+    // 关闭按钮
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "detail-close";
+    closeBtn.textContent = "✕";
+    closeBtn.onclick = closeDetail;
+    els.detailSheet.appendChild(closeBtn);
+    // 标题
+    const title = document.createElement("h3");
+    title.style.cssText = "margin:0 0 10px;font-size:16px";
+    title.textContent = "对话详情";
+    els.detailSheet.appendChild(title);
+    // 逐轮渲染（textContent 防 XSS）
+    turns.forEach(t => {
+      const turnDiv = document.createElement("div");
+      turnDiv.className = "detail-turn";
+      const roleDiv = document.createElement("div");
+      roleDiv.className = "dt-role";
+      roleDiv.textContent = `第${t.turn_index || "?"}轮`;
+      turnDiv.appendChild(roleDiv);
+      if (t.user_text) {
+        const userDiv = document.createElement("div");
+        userDiv.className = "dt-text";
+        userDiv.textContent = `🗣 我：${t.user_text}`;
+        turnDiv.appendChild(userDiv);
+      }
+      if (t.assistant_text) {
+        const asstDiv = document.createElement("div");
+        asstDiv.className = "dt-text";
+        asstDiv.textContent = `🤖 客户：${t.assistant_text}`;
+        turnDiv.appendChild(asstDiv);
+      }
+      els.detailSheet.appendChild(turnDiv);
+    });
+    if (!turns.length) {
+      const empty = document.createElement("div");
+      empty.className = "history-empty";
+      empty.textContent = "暂无对话记录";
+      els.detailSheet.appendChild(empty);
+    }
+  } catch (e) {
+    els.detailSheet.textContent = "";
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "detail-close";
+    closeBtn.textContent = "✕";
+    closeBtn.onclick = closeDetail;
+    els.detailSheet.appendChild(closeBtn);
+    const err = document.createElement("div");
+    err.className = "history-empty";
+    err.textContent = "加载失败";
+    els.detailSheet.appendChild(err);
+  }
+}
+
+function closeDetail() {
+  els.detailOverlay.classList.remove("show");
+}
+
+// ═══════════════════════════════════════════════════
 //  初始化
 // ═══════════════════════════════════════════════════
 async function init() {
@@ -1389,6 +1813,9 @@ async function init() {
     setStatus("error", "当前浏览器不支持麦克风。请使用 HTTPS 并在企微中打开。");
     els.actionBtn.disabled = true;
   }
+
+  // 加载训练记录
+  loadHistory();
 }
 
 init();
@@ -1400,7 +1827,39 @@ init();
 
 @app.get("/realtime")
 async def realtime_page():
-    return HTMLResponse(REALTIME_HTML)
+    return _render_template("realtime")
+
+
+@app.get("/api/training/history")
+async def training_history(limit: int = 10):
+    sessions = recent_completed_sessions(limit)
+    return [
+        {
+            "session_id": s.get("session_id"),
+            "stage": s.get("stage_id", ""),
+            "difficulty": s.get("difficulty_id", ""),
+            "turn_count": s.get("turn_count", 0),
+            "score": (s.get("evaluation") or {}).get("total_score"),
+            "final_state": s.get("final_state", ""),
+            "is_success": bool(s.get("is_success")),
+            "completed_at": s.get("completed_at", ""),
+        }
+        for s in sessions
+    ]
+
+
+@app.get("/api/training/session-turns")
+async def session_turns_api(session_id: str):
+    turns = get_session_turns(session_id)
+    return [
+        {
+            "turn_index": t.get("turn_index"),
+            "user_text": t.get("user_text"),
+            "assistant_text": t.get("assistant_text"),
+            "created_at": t.get("created_at"),
+        }
+        for t in turns
+    ]
 
 
 if __name__ == "__main__":

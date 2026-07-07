@@ -184,6 +184,22 @@ def _heuristic_evaluation(
         (rubric or {}).get("total_score") or 100)
     normalized_total = round(total_score * 100 / max_total) if max_total else 0
 
+    # v2.0: 如果 rubric 有 customer_behavior_rules，检查越界行为
+    cbr_violations = []
+    cbr = (rubric or {}).get("customer_behavior_rules")
+    if cbr and isinstance(cbr, dict):
+        by_state = cbr.get("by_state") or {}
+        for state_name, rules in by_state.items():
+            if not isinstance(rules, list):
+                continue
+            for rule in rules:
+                # 检查销售是否触发了客户防御规则中的关键行为
+                rule_keywords = str(rule)
+                # 如果客户在规则中说了特定话术，检查销售是否有对应回应
+                if any(kw in customer_text for kw in ("比价", "贵", "不需要", "不考虑", "再看看", "固定")):
+                    if not any(kw in sales_text for kw in ("理解", "分析", "对比", "方案", "差异", "优势", "匹配")):
+                        cbr_violations.append(rule)
+
     # 生成固定格式的改进建议和亮点总结
     improvements = [
         "下一轮优先把客户当前进展、货量、目的地和核心顾虑问具体。",
@@ -198,6 +214,24 @@ def _heuristic_evaluation(
     if not strengths:
         strengths.append("完成了基本对话往返，可作为复盘素材。")
 
+    # 加入 difficulty_variants 教练反馈
+    dv = (rubric or {}).get("difficulty_variants") or {}
+    difficulty = (case or {}).get("difficulty", "medium")
+    dv_info = dv.get(str(difficulty)) or dv.get("medium") or {}
+    pass_threshold = dv_info.get(
+        "pass_threshold") if isinstance(dv_info, dict) else None
+    coach_focus = dv_info.get("coach_focus") if isinstance(
+        dv_info, dict) else None
+
+    summary = f"本轮综合得分 {normalized_total}/100。"
+    if pass_threshold:
+        status = "达到" if normalized_total >= pass_threshold else "未达到"
+        summary += f" 该难度({difficulty})及格线：{pass_threshold}分，你{status}。"
+        if cbr_violations:
+            summary += f" 触发 {len(cbr_violations)} 条客户行为防御规则，建议复盘。"
+        if coach_focus and normalized_total < pass_threshold:
+            summary += f" 重点改进方向：{coach_focus}。"
+
     return {
         "session_id": session_id,
         "case_id": (case or {}).get("case_id"),
@@ -208,7 +242,10 @@ def _heuristic_evaluation(
         "dimension_scores": dimension_scores,
         "strengths": strengths[:3],
         "improvements": improvements[:3],
-        "summary": f"本轮综合得分 {normalized_total}/100。评分已按当前 case 的 rubric 维度折算。",
+        "summary": summary,
+        "difficulty_variants": dv,
+        "pass_threshold": pass_threshold,
+        "violations": cbr_violations[:5] if cbr_violations else None,
     }
 
 
@@ -294,6 +331,7 @@ def _normalize_evaluation(
         "strengths": [_clip(item, 120) for item in strengths[:3]] or ["对话已完成，可进入复盘。"],
         "improvements": [_clip(item, 140) for item in improvements[:3]] or ["下一轮补充更明确的客户需求和下一步动作。"],
         "summary": _clip(payload.get("summary") or f"本轮综合得分 {normalized_total}/100。", 220),
+        "difficulty_variants": (rubric or {}).get("difficulty_variants"),
     }
 
 
@@ -330,7 +368,20 @@ def _llm_evaluation(
         f"场景：{(case or {}).get('scene', '')}\n\n"
         f"评分维度：{json.dumps(dimensions, ensure_ascii=False)}\n\n"
         f"关键红线：{json.dumps((rubric or {}).get('critical_mistakes', []), ensure_ascii=False)}\n\n"
-        f"对话：\n{_conversation_text(turns)}\n\n"
+    )
+    # v2.0 新增字段注入
+    if rubric.get("failure_conditions"):
+        prompt += (
+            "扣分红线（触发即扣对应分数，严重违规直接判负）：\n"
+            f"{json.dumps(rubric['failure_conditions'], ensure_ascii=False)}\n\n"
+        )
+    if rubric.get("training_goals"):
+        prompt += (
+            "核心训练目标（这些是本次训练的重点评估方向）：\n"
+            f"{json.dumps(rubric['training_goals'], ensure_ascii=False)}\n\n"
+        )
+    prompt += f"对话：\n{_conversation_text(turns)}\n\n"
+    prompt += (
         "JSON 格式："
         "{\"total_score\": 0, \"dimension_scores\": "
         "[{\"dimension\": \"\", \"score\": 0, \"max_score\": 0, \"reason\": \"\"}], "

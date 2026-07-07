@@ -33,14 +33,18 @@ try:
     from .fastrtc_new_web import LAST_STATUS as WEB_LAST_STATUS, run_customer_turn, set_status
     from .fastrtc_new_web import _build_session_training_prompt, _choice_label
     from .case_loader import get_case
-    from .training_data_context import summarize_case_assets
+    from .training_data_context import summarize_case_assets, find_rubric
     from .training_config import load_stages, stage_choices, difficulty_choices
+    from .conversation_store import get_session_turns, end_session
+    from .training_evaluator import _heuristic_evaluation
 except ImportError:
     from fastrtc_new_web import LAST_STATUS as WEB_LAST_STATUS, run_customer_turn, set_status
     from fastrtc_new_web import _build_session_training_prompt, _choice_label
     from case_loader import get_case
-    from training_data_context import summarize_case_assets
+    from training_data_context import summarize_case_assets, find_rubric
     from training_config import load_stages, stage_choices, difficulty_choices
+    from conversation_store import get_session_turns, end_session
+    from training_evaluator import _heuristic_evaluation
 
 import dashscope
 from dashscope import Generation
@@ -57,23 +61,27 @@ SAMPLE_WIDTH = 2  # 16-bit
 BYTES_PER_FRAME = SAMPLE_WIDTH * CHANNELS
 
 # ── VAD 参数（能量检测） ─────────────────────────────
-VAD_THRESHOLD = float(os.getenv("WS_VAD_THRESHOLD", "0.018"))       # RMS 阈值
-VAD_MIN_SPEECH_MS = int(os.getenv("WS_VAD_MIN_SPEECH_MS", "450"))  # 最短语音
+VAD_THRESHOLD = float(os.getenv("WS_VAD_THRESHOLD", "0.024"))       # RMS 阈值
+VAD_MIN_SPEECH_MS = int(os.getenv("WS_VAD_MIN_SPEECH_MS", "320"))  # 最短语音
 VAD_MIN_SILENCE_MS = int(
-    os.getenv("WS_VAD_MIN_SILENCE_MS", "1600"))  # 最短静音=句结束
+    os.getenv("WS_VAD_MIN_SILENCE_MS", "850"))  # 最短静音=句结束
 VAD_CHUNK_MS = int(os.getenv("WS_VAD_CHUNK_MS", "100"))            # 检测粒度
-MIN_UTTERANCE_MS = int(os.getenv("WS_MIN_UTTERANCE_MS", "900"))
-MIN_AUDIO_RMS = float(os.getenv("WS_MIN_AUDIO_RMS", "0.012"))
+VAD_MAX_UTTERANCE_MS = int(
+    os.getenv("WS_VAD_MAX_UTTERANCE_MS", "5200"))  # 最长一句，超时强制切句
+MIN_UTTERANCE_MS = int(os.getenv("WS_MIN_UTTERANCE_MS", "650"))
+MIN_AUDIO_RMS = float(os.getenv("WS_MIN_AUDIO_RMS", "0.010"))
 
 # ── ASR 参数 ─────────────────────────────────────────
-ASR_TRAILING_SILENCE_MS = int(os.getenv("WS_ASR_TRAILING_SILENCE_MS", "1800"))
+ASR_TRAILING_SILENCE_MS = int(os.getenv("WS_ASR_TRAILING_SILENCE_MS", "700"))
 ASR_MAX_SENTENCE_SILENCE_MS = int(
-    os.getenv("WS_ASR_MAX_SENTENCE_SILENCE_MS", "1800"))
+    os.getenv("WS_ASR_MAX_SENTENCE_SILENCE_MS", "900"))
 ASR_CALLBACK_FRAME_BYTES = int(
-    os.getenv("WS_ASR_CALLBACK_FRAME_BYTES", "6400"))
+    os.getenv("WS_ASR_CALLBACK_FRAME_BYTES", "3200"))
 ASR_CALLBACK_FIRST_TIMEOUT_S = float(
-    os.getenv("WS_ASR_CALLBACK_FIRST_TIMEOUT_S", "8.0"))
-ASR_CALLBACK_GRACE_S = float(os.getenv("WS_ASR_CALLBACK_GRACE_S", "1.2"))
+    os.getenv("WS_ASR_CALLBACK_FIRST_TIMEOUT_S", "3.5"))
+ASR_CALLBACK_GRACE_S = float(os.getenv("WS_ASR_CALLBACK_GRACE_S", "0.18"))
+TTS_STREAM_CHUNK_MS = int(os.getenv("WS_TTS_STREAM_CHUNK_MS", "240"))
+TTS_STREAM_CHUNK_PAUSE_MS = float(os.getenv("WS_TTS_STREAM_CHUNK_PAUSE_MS", "0.005"))
 
 
 # ═══════════════════════════════════════════════════════
@@ -92,12 +100,14 @@ class SimpleVAD:
         threshold: float = VAD_THRESHOLD,
         min_speech_ms: int = VAD_MIN_SPEECH_MS,
         min_silence_ms: int = VAD_MIN_SILENCE_MS,
+        max_utterance_ms: int = VAD_MAX_UTTERANCE_MS,
         chunk_ms: int = VAD_CHUNK_MS,
         sample_rate: int = SAMPLE_RATE_IN,
     ):
         self.threshold = threshold
         self.min_speech_frames = max(1, min_speech_ms // chunk_ms)
         self.min_silence_frames = max(1, min_silence_ms // chunk_ms)
+        self.max_utterance_frames = max(1, max_utterance_ms // chunk_ms)
         self.sample_rate = sample_rate
         self.chunk_samples = int(sample_rate * chunk_ms / 1000)
 
@@ -107,6 +117,7 @@ class SimpleVAD:
         self._total_samples = 0
         self._speech_frames = 0
         self._silence_frames = 0
+        self._utterance_frames = 0
         self._in_speech = False
 
     # ── 内部 ──
@@ -154,11 +165,13 @@ class SimpleVAD:
                     if self._speech_frames >= self.min_speech_frames:
                         self._in_speech = True
                         self._utterance_buffer.extend(self._candidate_buffer)
+                        self._utterance_frames = max(1, len(self._utterance_buffer) // chunk_bytes)
                         self._candidate_buffer.clear()
                         events.append("speech_start")
             else:
                 if self._in_speech:
                     self._utterance_buffer.extend(chunk)
+                    self._utterance_frames += 1
                     self._silence_frames += 1
                     if self._silence_frames >= self.min_silence_frames:
                         self._in_speech = False
@@ -170,6 +183,14 @@ class SimpleVAD:
                     self._silence_frames = 0
                     self._candidate_buffer.clear()
 
+            if self._in_speech and is_speech:
+                self._utterance_frames += 1
+                if self._utterance_frames >= self.max_utterance_frames:
+                    self._in_speech = False
+                    self._speech_frames = 0
+                    self._silence_frames = 0
+                    events.append("speech_end_forced")
+
         return events
 
     def extract_speech(self) -> bytes:
@@ -177,6 +198,10 @@ class SimpleVAD:
         pcm = bytes(self._utterance_buffer)
         self.reset()
         return pcm
+
+    @property
+    def has_pending_utterance(self) -> bool:
+        return bool(self._utterance_buffer)
 
     def reset(self) -> None:
         """完全重置 VAD 状态和缓冲区。"""
@@ -186,6 +211,7 @@ class SimpleVAD:
         self._total_samples = 0
         self._speech_frames = 0
         self._silence_frames = 0
+        self._utterance_frames = 0
         self._in_speech = False
 
     @property
@@ -301,13 +327,31 @@ def _is_probable_asr_hallucination(text: str, duration_ms: float, rms: float) ->
 class _StreamAsrCallback(RecognitionCallback):
     """DashScope ASR callback，用于流式 PCM → 实时文本。"""
 
-    def __init__(self):
+    def __init__(self, loop: asyncio.AbstractEventLoop, on_partial=None):
         self.first_final_event = asyncio.Event()
         self.complete_event = asyncio.Event()
         self.error_event = asyncio.Event()
         self.lock = asyncio.Lock()
         self.sentences: list[dict] = []
         self.latest_text = ""
+        self.last_partial_text = ""
+        self.loop = loop
+        self.on_partial = on_partial
+
+    def _emit_partial(self, text: str) -> None:
+        if not text or text == self.last_partial_text or self.on_partial is None:
+            return
+        self.last_partial_text = text
+
+        def _schedule_partial() -> None:
+            try:
+                result = self.on_partial(text)
+                if asyncio.iscoroutine(result):
+                    asyncio.create_task(result)
+            except Exception:
+                pass
+
+        self.loop.call_soon_threadsafe(_schedule_partial)
 
     def on_event(self, result: RecognitionResult) -> None:
         sentence = result.get_sentence()
@@ -316,6 +360,7 @@ class _StreamAsrCallback(RecognitionCallback):
         text = (sentence.get("text") or "").strip()
         if text:
             self.latest_text = text
+            self._emit_partial(text)
         if RecognitionResult.is_sentence_end(sentence):
             sid = sentence.get("sentence_id")
             if sid is None or all(s.get("sentence_id") != sid for s in self.sentences):
@@ -336,11 +381,15 @@ class _StreamAsrCallback(RecognitionCallback):
         return self.latest_text.strip()
 
 
-async def _recognize_pcm_streaming(pcm_bytes: bytes, sample_rate: int = ASR_SAMPLE_RATE) -> str:
+async def _recognize_pcm_streaming(
+    pcm_bytes: bytes,
+    sample_rate: int = ASR_SAMPLE_RATE,
+    on_partial=None,
+) -> str:
     """将 PCM 字节流传入 DashScope ASR callback，返回识别文本。"""
     loop = asyncio.get_running_loop()
 
-    callback = _StreamAsrCallback()
+    callback = _StreamAsrCallback(loop, on_partial=on_partial)
     recognition = Recognition(
         model=os.getenv("DASHSCOPE_ASR_MODEL", "paraformer-realtime-v2"),
         callback=callback,
@@ -482,7 +531,11 @@ async def _process_utterance(
         await ws_send_json({"type": "status", "stage": "listening", "detail": "音频格式异常，请再说一遍"})
         return
 
-    user_text = await _recognize_pcm_streaming(asr_pcm, sample_rate=ASR_SAMPLE_RATE)
+    user_text = await _recognize_pcm_streaming(
+        asr_pcm,
+        sample_rate=ASR_SAMPLE_RATE,
+        on_partial=lambda text: ws_send_json({"type": "asr_partial", "text": text}),
+    )
     asr_time = time.perf_counter() - t0
 
     if not user_text or _is_probable_asr_hallucination(user_text, audio_duration_ms, audio_rms):
@@ -498,7 +551,7 @@ async def _process_utterance(
         return
 
     await ws_send_json({"type": "asr_final", "text": user_text})
-    await ws_send_json({"type": "status", "stage": "processing"})
+    await ws_send_json({"type": "status", "stage": "processing", "detail": "正在生成客户回复"})
 
     # ── Step 2: 完整训练管道（线程池中同步执行） ──
     stage_id = session.config.get("stage_id", "cold_call")
@@ -530,7 +583,8 @@ async def _process_utterance(
     training = turn.get("training", {})
     next_state = turn.get("next_state", "")
 
-    # ── Step 3: 下发文本消息 ──
+    # ── Step 3: 下发文本 + TTS 播放状态 ──
+    await ws_send_json({"type": "status", "stage": "speaking", "detail": "正在播放客户语音"})
     await ws_send_json({
         "type": "response_text",
         "text": response_text,
@@ -552,21 +606,45 @@ async def _process_utterance(
     audio_bytes = turn.get("audio_bytes", b"")
     if audio_bytes:
         audio_chunks = split_pcm_chunks(
-            audio_bytes, chunk_duration_ms=100, sample_rate=SAMPLE_RATE_OUT)
+            audio_bytes, chunk_duration_ms=TTS_STREAM_CHUNK_MS, sample_rate=SAMPLE_RATE_OUT)
         for chunk in audio_chunks:
             if session.interrupted:
                 session.clear_interrupt()
                 break
             await ws_send_bytes(chunk)
-            await asyncio.sleep(0.02)
+            if TTS_STREAM_CHUNK_PAUSE_MS > 0:
+                await asyncio.sleep(TTS_STREAM_CHUNK_PAUSE_MS)
 
     await ws_send_json({"type": "tts_done"})
 
-    # ── Step 5: 下发每轮评估信息 ──
+    # ── Step 5: 启发式数值评分（线程池，纯字符串匹配 <10ms） ──
     is_terminal = training.get(
         "training_complete") or training.get("final_state")
     is_success = training.get("is_success")
     is_failure = training.get("is_failure")
+
+    heuristic_score = None
+    heuristic_dims = []
+    case_id = training.get("case_id")
+    if case_id:
+        try:
+            turns, case = await asyncio.gather(
+                loop.run_in_executor(None, get_session_turns, session.session_id),
+                loop.run_in_executor(None, get_case, case_id),
+            )
+            rubric = find_rubric(case_id=case_id)
+            if turns and rubric:
+                eval_result = await loop.run_in_executor(
+                    None, _heuristic_evaluation,
+                    session.session_id, case, rubric, turns[-8:],
+                )
+                heuristic_score = eval_result.get("total_score")
+                heuristic_dims = [
+                    {"name": d["dimension"], "score": d["score"], "max": d["max_score"]}
+                    for d in eval_result.get("dimension_scores", [])
+                ]
+        except Exception:
+            pass
 
     await ws_send_json({
         "type": "evaluation",
@@ -576,6 +654,10 @@ async def _process_utterance(
         "is_failure": bool(is_failure),
         "current_state": current_state or training.get("current_state", ""),
         "final_state": training.get("final_state", ""),
+        "score": heuristic_score,
+        "dimensions": heuristic_dims,
+        "score_notes": turn.get("score_notes", {}),
+        "triggered_events": training.get("last_triggered_events", []),
     })
 
     # 记录本轮
@@ -593,6 +675,21 @@ async def _process_utterance(
         next_state=next_state,
         terminal=bool(is_terminal),
     )
+
+    # ── 下发 session_info（在 history.append 之后，轮次准确） ──
+    _timings = {}
+    try:
+        _st = dict(WEB_LAST_STATUS)
+        _timings = _st.get("timings", {}) if isinstance(_st.get("timings"), dict) else {}
+    except Exception:
+        pass
+    await ws_send_json({
+        "type": "session_info",
+        "turn_count": len(session.history),
+        "current_state": current_state or training.get("current_state", ""),
+        "total_asr_s": round(asr_time, 1),
+        "total_llm_s": round(_timings.get("qwen_s", 0), 1),
+    })
 
     # ── Step 6: 获取评分详情（仅终局，轮询后台评估线程） ──
     if is_terminal:
@@ -644,6 +741,43 @@ async def _process_utterance(
 #  Session 启动：下发 persona + goal
 # ═══════════════════════════════════════════════════════
 
+_OPENING_BY_STATUS = {
+    "已报价-等待客户确认": "报价我看了，你说说具体怎么操作？",
+    "已报价-客户有异议": "你们价格比别人高，怎么解释？",
+    "已报价-客户在比价": "我还在对比几家，你先说重点。",
+    "已报价-已确认试单": "试单确认了，托书什么时候发？",
+    "初次接触-了解需求": "你好，直接说你们能做什么。",
+    "初次接触-客户主动询价": "我最近有票货要发，你们能走什么价？",
+    "已合作-定期回访": "最近忙什么呢？好久没联系了。",
+    "已合作-服务升级沟通": "我们最近量在涨，你们价格能不能再低点？",
+    "运输中-问题处理": "我这边有票货被查了，你们能帮忙处理吗？",
+    "投诉已处理-回访确认": "上次的问题处理得还行，你打电话是？",
+    "问题已解决-回访确认": "货收到了，你打电话有事？",
+    "曾合作-已流失3个月": "好久没联系了，你找我有事？",
+    "潜在客户-旺季提醒": "听说旺季舱位紧张，你们有什么方案？",
+    "已报价-等待反馈": "报价我看了，有几个地方不太明白。",
+}
+
+
+def _derive_opening(current_status: str) -> str:
+    """根据客户当前状态推断场景化开场白。"""
+    if not current_status:
+        return ""
+    opening = _OPENING_BY_STATUS.get(current_status.strip())
+    if opening:
+        return opening
+    # 模糊匹配：状态关键词包含"已报价"等
+    if "已报价" in current_status:
+        return "报价我看了，你说说具体细节。"
+    if "初次接触" in current_status or "了解需求" in current_status:
+        return "你好，直接说重点。"
+    if "已合作" in current_status or "老客户" in current_status:
+        return "最近忙什么呢？好久没联系了。"
+    if "回访" in current_status:
+        return "上次的事怎么样了？"
+    return ""
+
+
 async def _send_persona_and_goal(session: VoiceSession, ws_send_json) -> None:
     """在 session 启动后，下发客户画像和训练目标到 H5 客户端。"""
     stage_id = session.config.get("stage_id", "cold_call")
@@ -683,6 +817,7 @@ async def _send_persona_and_goal(session: VoiceSession, ws_send_json) -> None:
         "must_do": assets.get("must_do", []),
         "critical": assets.get("critical_mistakes", []),
         "current_status": assets.get("current_status") or "",
+        "opening": _derive_opening(assets.get("current_status") or ""),
     })
 
 
@@ -823,12 +958,21 @@ async def handle_voice_ws(ws):
                     session.interrupt()
                     await _send_json({"type": "status", "stage": "listening", "detail": "已打断，请继续"})
 
-                if "speech_end" in events and not session.interrupted:
+                speech_finished = "speech_end" in events or "speech_end_forced" in events
+                if speech_finished and not session.interrupted:
                     pcm = session.vad.extract_speech()
                     min_bytes = int(session.sample_rate *
                                     MIN_UTTERANCE_MS / 1000) * BYTES_PER_FRAME
                     if len(pcm) >= min_bytes:
-                        await _send_json({"type": "status", "stage": "processing", "detail": "正在识别"})
+                        detail = "正在识别"
+                        if "speech_end_forced" in events:
+                            detail = "检测到长句，开始识别"
+                            set_status(
+                                "ws_vad_forced_segment",
+                                audio_duration_ms=round(_pcm_duration_ms(pcm, session.sample_rate), 1),
+                                sample_rate=session.sample_rate,
+                            )
+                        await _send_json({"type": "status", "stage": "processing", "detail": detail})
                         asyncio.create_task(
                             _process_utterance_safe(
                                 session, pcm, _send_json, _send_bytes)
@@ -878,8 +1022,37 @@ async def handle_voice_ws(ws):
                     elif action == "resume":
                         await _send_json({"type": "status", "stage": "listening"})
 
+                    elif action == "flush":
+                        if not session or session.processing_lock.locked():
+                            continue
+                        if not session.vad.has_pending_utterance:
+                            continue
+                        pcm = session.vad.extract_speech()
+                        min_bytes = int(session.sample_rate *
+                                        MIN_UTTERANCE_MS / 1000) * BYTES_PER_FRAME
+                        if len(pcm) < min_bytes:
+                            set_status(
+                                "ws_client_flush_too_short",
+                                audio_duration_ms=round(
+                                    _pcm_duration_ms(pcm, session.sample_rate), 1),
+                                sample_rate=session.sample_rate,
+                            )
+                            await _send_json({"type": "status", "stage": "listening", "detail": "语音太短，请再说完整一点"})
+                            continue
+                        set_status(
+                            "ws_client_flush",
+                            audio_duration_ms=round(_pcm_duration_ms(pcm, session.sample_rate), 1),
+                            sample_rate=session.sample_rate,
+                        )
+                        await _send_json({"type": "status", "stage": "processing", "detail": "检测到停顿，开始识别"})
+                        asyncio.create_task(
+                            _process_utterance_safe(
+                                session, pcm, _send_json, _send_bytes)
+                        )
+
                     elif action == "end":
                         if session:
+                            end_session(session.session_id, end_reason="manual")
                             await _send_json({
                                 "type": "session_end",
                                 "turn_count": len(session.history),
