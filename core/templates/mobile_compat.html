@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>移动端兼容检测 · 雄达物流客户陪练</title>
+<style>
+  :root { color-scheme: light; --bg:#f6f7f9; --panel:#fff; --ink:#172033; --muted:#667085; --line:#d9dee8; --ok:#027a48; --warn:#b54708; --bad:#b42318; --brand:#007a78; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  main { width:min(100%,720px); margin:0 auto; padding:16px; display:grid; gap:12px; }
+  header { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+  h1 { margin:0; font-size:22px; line-height:1.25; }
+  .sub { margin-top:5px; color:var(--muted); font-size:13px; line-height:1.45; }
+  .links { display:flex; flex-wrap:wrap; gap:8px; }
+  a, button { min-height:40px; border-radius:8px; font-size:14px; font-weight:700; text-decoration:none; }
+  a { display:inline-flex; align-items:center; padding:0 12px; color:var(--brand); border:1px solid var(--line); background:#fff; }
+  button { border:0; padding:0 16px; color:#fff; background:var(--brand); }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .row { display:grid; grid-template-columns:96px 1fr; gap:10px; padding:12px; border-bottom:1px solid #eef1f5; align-items:start; }
+  .row:last-child { border-bottom:0; }
+  .name { font-weight:800; font-size:14px; }
+  .detail { font-size:13px; color:var(--muted); line-height:1.45; word-break:break-word; }
+  .pill { display:inline-block; min-width:44px; padding:2px 8px; border-radius:999px; text-align:center; font-size:12px; font-weight:800; color:#fff; }
+  .ok { background:var(--ok); }
+  .warn { background:var(--warn); }
+  .bad { background:var(--bad); }
+  .pending { background:#98a2b3; }
+  .meter { height:8px; border-radius:999px; background:#e8eef6; overflow:hidden; margin-top:8px; }
+  .bar { height:100%; width:0%; background:var(--brand); transition:width .18s; }
+  pre { white-space:pre-wrap; margin:0; font-size:12px; line-height:1.45; color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>移动端兼容检测</h1>
+      <div class="sub">用于确认企微手机环境是否能进行实时语音采集和 WebSocket 通讯。</div>
+    </div>
+  </header>
+  <div class="links">
+    <button id="runBtn" type="button">开始检测</button>
+    <a href="/mobile">Omni 实时</a>
+    <a href="/mobile/upload">上传兜底</a>
+    <a href="/realtime">经典实时</a>
+  </div>
+  <section id="results"></section>
+  <section>
+    <div class="row">
+      <div class="name">环境</div>
+      <div class="detail"><pre id="envText"></pre></div>
+    </div>
+  </section>
+</main>
+<script>
+const checks = [
+  ['secure', '安全上下文'],
+  ['media', '麦克风 API'],
+  ['audio', 'AudioContext'],
+  ['level', '输入音量'],
+  ['ws', 'WebSocket'],
+  ['rtc', 'WebRTC'],
+  ['recorder', '录音兜底'],
+];
+const results = document.getElementById('results');
+const envText = document.getElementById('envText');
+const runBtn = document.getElementById('runBtn');
+
+function row(id, name) {
+  const el = document.createElement('div');
+  el.className = 'row';
+  el.id = 'row-' + id;
+  el.innerHTML = '<div class="name">' + name + '</div><div class="detail"><span class="pill pending">等待</span> <span class="msg"></span><div class="meter" style="display:none"><div class="bar"></div></div></div>';
+  results.appendChild(el);
+}
+
+function setResult(id, kind, msg, pct) {
+  const el = document.getElementById('row-' + id);
+  const pill = el.querySelector('.pill');
+  const body = el.querySelector('.msg');
+  const meter = el.querySelector('.meter');
+  const bar = el.querySelector('.bar');
+  pill.className = 'pill ' + kind;
+  pill.textContent = kind === 'ok' ? '通过' : (kind === 'warn' ? '注意' : '失败');
+  body.textContent = msg || '';
+  if (pct != null) {
+    meter.style.display = 'block';
+    bar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  }
+}
+
+function wait(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+async function testWebSocket() {
+  return new Promise((resolve) => {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(proto + '//' + location.host + '/ws/audio-probe');
+    const timer = setTimeout(() => { try { ws.close(); } catch(e){} resolve(['bad', '连接超时']); }, 5000);
+    ws.onopen = () => ws.send(JSON.stringify({ action: 'ping', payload: 'compat' }));
+    ws.onmessage = (event) => {
+      if (typeof event.data !== 'string') return;
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'pong') {
+          clearTimeout(timer);
+          ws.close();
+          resolve(['ok', 'WebSocket 探针正常']);
+        }
+      } catch(e) {}
+    };
+    ws.onerror = () => { clearTimeout(timer); resolve(['bad', 'WebSocket 连接失败']); };
+  });
+}
+
+async function runChecks() {
+  runBtn.disabled = true;
+  envText.textContent = [
+    'userAgent: ' + navigator.userAgent,
+    'platform: ' + navigator.platform,
+    'secureContext: ' + window.isSecureContext,
+    'protocol: ' + location.protocol,
+  ].join('\n');
+
+  setResult('secure', window.isSecureContext ? 'ok' : 'bad', window.isSecureContext ? '当前页面可请求麦克风' : '需要 HTTPS 或 localhost');
+  setResult('media', navigator.mediaDevices && navigator.mediaDevices.getUserMedia ? 'ok' : 'bad', navigator.mediaDevices ? 'getUserMedia 可用' : '当前 WebView 不支持麦克风 API');
+  setResult('rtc', window.RTCPeerConnection ? 'ok' : 'warn', window.RTCPeerConnection ? 'RTCPeerConnection 可用' : '官方 WebRTC 方案不可用');
+  const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/aac'];
+  const supported = window.MediaRecorder ? types.filter(t => MediaRecorder.isTypeSupported(t)) : [];
+  setResult('recorder', supported.length ? 'ok' : 'warn', supported.length ? supported.join(', ') : 'MediaRecorder 不可用，需使用其他上传兜底');
+  const wsResult = await testWebSocket();
+  setResult('ws', wsResult[0], wsResult[1]);
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setResult('audio', 'bad', '无法进入麦克风检测');
+    setResult('level', 'bad', '无音频输入');
+    runBtn.disabled = false;
+    return;
+  }
+
+  let stream, ctx;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ctx = new AC({ latencyHint: 'interactive' });
+    if (ctx.state === 'suspended') await ctx.resume();
+    setResult('audio', 'ok', '采样率 ' + ctx.sampleRate + ' Hz');
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    source.connect(analyser);
+    const data = new Float32Array(analyser.fftSize);
+    let maxRms = 0;
+    const started = performance.now();
+    while (performance.now() - started < 1800) {
+      analyser.getFloatTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+      const rms = Math.sqrt(sum / data.length);
+      maxRms = Math.max(maxRms, rms);
+      setResult('level', maxRms > 0.006 ? 'ok' : 'warn', '请说话测试，峰值 RMS ' + maxRms.toFixed(4), Math.round(maxRms * 900));
+      await wait(120);
+    }
+  } catch (e) {
+    setResult('audio', 'bad', e.message || String(e));
+    setResult('level', 'bad', '麦克风未授权或不可用');
+  } finally {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (ctx) ctx.close().catch(() => {});
+    runBtn.disabled = false;
+  }
+}
+
+checks.forEach(([id, name]) => row(id, name));
+runBtn.addEventListener('click', runChecks);
+</script>
+</body>
+</html>

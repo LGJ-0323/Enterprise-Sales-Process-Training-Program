@@ -71,11 +71,14 @@ if _backend_name == "mysql":
             get_recent_memory,
             get_session,
             get_session_turns,
+            get_training_user,
             init_db,
             recent_completed_sessions,
             save_session_evaluation,
+            save_session_snapshot,
             save_turn,
             update_turn_audio_bytes,
+            upsert_training_user,
             utc_now,
         )
     except ImportError as exc:
@@ -90,11 +93,14 @@ else:
         get_recent_memory,
         get_session,
         get_session_turns,
+        get_training_user,
         init_db,
         recent_completed_sessions,
         save_session_evaluation,
+        save_session_snapshot,
         save_turn,
         update_turn_audio_bytes,
+        upsert_training_user,
         utc_now,
     )
 

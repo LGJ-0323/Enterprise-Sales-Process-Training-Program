@@ -35,7 +35,7 @@ try:
     from .case_loader import get_case
     from .training_data_context import summarize_case_assets, find_rubric
     from .training_config import load_stages, stage_choices, difficulty_choices
-    from .conversation_store import get_session_turns, end_session
+    from .conversation_store import get_session_turns, end_session, save_session_snapshot
     from .training_evaluator import _heuristic_evaluation
 except ImportError:
     from fastrtc_new_web import LAST_STATUS as WEB_LAST_STATUS, run_customer_turn, set_status
@@ -43,7 +43,7 @@ except ImportError:
     from case_loader import get_case
     from training_data_context import summarize_case_assets, find_rubric
     from training_config import load_stages, stage_choices, difficulty_choices
-    from conversation_store import get_session_turns, end_session
+    from conversation_store import get_session_turns, end_session, save_session_snapshot
     from training_evaluator import _heuristic_evaluation
 
 import dashscope
@@ -81,7 +81,8 @@ ASR_CALLBACK_FIRST_TIMEOUT_S = float(
     os.getenv("WS_ASR_CALLBACK_FIRST_TIMEOUT_S", "3.5"))
 ASR_CALLBACK_GRACE_S = float(os.getenv("WS_ASR_CALLBACK_GRACE_S", "0.18"))
 TTS_STREAM_CHUNK_MS = int(os.getenv("WS_TTS_STREAM_CHUNK_MS", "240"))
-TTS_STREAM_CHUNK_PAUSE_MS = float(os.getenv("WS_TTS_STREAM_CHUNK_PAUSE_MS", "0.005"))
+TTS_STREAM_CHUNK_PAUSE_MS = float(
+    os.getenv("WS_TTS_STREAM_CHUNK_PAUSE_MS", "0.005"))
 
 
 # ═══════════════════════════════════════════════════════
@@ -165,7 +166,8 @@ class SimpleVAD:
                     if self._speech_frames >= self.min_speech_frames:
                         self._in_speech = True
                         self._utterance_buffer.extend(self._candidate_buffer)
-                        self._utterance_frames = max(1, len(self._utterance_buffer) // chunk_bytes)
+                        self._utterance_frames = max(
+                            1, len(self._utterance_buffer) // chunk_bytes)
                         self._candidate_buffer.clear()
                         events.append("speech_start")
             else:
@@ -473,6 +475,32 @@ class VoiceSession:
 #  核心：处理一句话的完整流水线（委托给 run_customer_turn）
 # ═══════════════════════════════════════════════════════
 
+def _trainer_info_from_config(config: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "trainer_user_id",
+        "trainer_external_user_id",
+        "trainer_name",
+        "trainer_department",
+        "trainer_source",
+        "trainer_avatar_url",
+        "user_id",
+        "external_user_id",
+        "wecom_userid",
+        "wecom_user_id",
+        "display_name",
+        "user_name",
+        "department",
+        "department_name",
+        "avatar_url",
+        "source",
+    )
+    info = {key: config.get(key) for key in keys if config.get(key)}
+    trainer = config.get("trainer")
+    if isinstance(trainer, dict):
+        info["trainer"] = trainer
+    return info
+
+
 async def _process_utterance_safe(
     session: VoiceSession,
     pcm_bytes: bytes,
@@ -534,7 +562,8 @@ async def _process_utterance(
     user_text = await _recognize_pcm_streaming(
         asr_pcm,
         sample_rate=ASR_SAMPLE_RATE,
-        on_partial=lambda text: ws_send_json({"type": "asr_partial", "text": text}),
+        on_partial=lambda text: ws_send_json(
+            {"type": "asr_partial", "text": text}),
     )
     asr_time = time.perf_counter() - t0
 
@@ -558,6 +587,9 @@ async def _process_utterance(
     difficulty_id = session.config.get("difficulty_id", "easy")
     voice_id = session.config.get("voice_id", "longsanshu_v3")
     avatar_id = session.config.get("avatar_id", "auto")
+    business_line = session.config.get("business_line")
+    preferred_case_id = session.config.get("case_id")
+    trainer_info = _trainer_info_from_config(session.config)
 
     loop = asyncio.get_running_loop()
     try:
@@ -570,6 +602,9 @@ async def _process_utterance(
                 voice_id=voice_id,
                 avatar_id=avatar_id,
                 session_id=session.session_id,
+                business_line=business_line,
+                preferred_case_id=preferred_case_id,
+                trainer_info=trainer_info,
             ),
         )
     except Exception as exc:
@@ -629,7 +664,8 @@ async def _process_utterance(
     if case_id:
         try:
             turns, case = await asyncio.gather(
-                loop.run_in_executor(None, get_session_turns, session.session_id),
+                loop.run_in_executor(
+                    None, get_session_turns, session.session_id),
                 loop.run_in_executor(None, get_case, case_id),
             )
             rubric = find_rubric(case_id=case_id)
@@ -640,7 +676,8 @@ async def _process_utterance(
                 )
                 heuristic_score = eval_result.get("total_score")
                 heuristic_dims = [
-                    {"name": d["dimension"], "score": d["score"], "max": d["max_score"]}
+                    {"name": d["dimension"], "score": d["score"],
+                        "max": d["max_score"]}
                     for d in eval_result.get("dimension_scores", [])
                 ]
         except Exception:
@@ -680,7 +717,8 @@ async def _process_utterance(
     _timings = {}
     try:
         _st = dict(WEB_LAST_STATUS)
-        _timings = _st.get("timings", {}) if isinstance(_st.get("timings"), dict) else {}
+        _timings = _st.get("timings", {}) if isinstance(
+            _st.get("timings"), dict) else {}
     except Exception:
         pass
     await ws_send_json({
@@ -782,9 +820,15 @@ async def _send_persona_and_goal(session: VoiceSession, ws_send_json) -> None:
     """在 session 启动后，下发客户画像和训练目标到 H5 客户端。"""
     stage_id = session.config.get("stage_id", "cold_call")
     difficulty_id = session.config.get("difficulty_id", "easy")
+    business_line = session.config.get("business_line")
+    preferred_case_id = session.config.get("case_id")
     try:
         _, summary, context = _build_session_training_prompt(
-            session.session_id, stage_id, difficulty_id,
+            session.session_id,
+            stage_id,
+            difficulty_id,
+            preferred_case_id=preferred_case_id,
+            business_line=business_line,
         )
         case = get_case(context.get("case_id")) if context.get(
             "case_id") else None
@@ -969,7 +1013,8 @@ async def handle_voice_ws(ws):
                             detail = "检测到长句，开始识别"
                             set_status(
                                 "ws_vad_forced_segment",
-                                audio_duration_ms=round(_pcm_duration_ms(pcm, session.sample_rate), 1),
+                                audio_duration_ms=round(
+                                    _pcm_duration_ms(pcm, session.sample_rate), 1),
                                 sample_rate=session.sample_rate,
                             )
                         await _send_json({"type": "status", "stage": "processing", "detail": detail})
@@ -1004,6 +1049,21 @@ async def handle_voice_ws(ws):
                             "sample_rate") or data.get("sample_rate"))
                         session = VoiceSession(sid, sample_rate=sample_rate)
                         session.config = config
+                        try:
+                            save_session_snapshot(sid, {
+                                "session_id": sid,
+                                "pipeline": "voice_ws",
+                                "selected_config": config,
+                                "base_case_id": config.get("case_id"),
+                                "candidate_count": config.get("candidate_count"),
+                                "selected_labels": {
+                                    "industry": config.get("industry_label"),
+                                    "sub_industry": config.get("sub_industry_label"),
+                                    "business_line": config.get("business_line_label"),
+                                },
+                            })
+                        except Exception as exc:
+                            set_status("snapshot_save_error", error=str(exc))
                         await _send_json({
                             "type": "status",
                             "stage": "listening",
@@ -1041,7 +1101,8 @@ async def handle_voice_ws(ws):
                             continue
                         set_status(
                             "ws_client_flush",
-                            audio_duration_ms=round(_pcm_duration_ms(pcm, session.sample_rate), 1),
+                            audio_duration_ms=round(
+                                _pcm_duration_ms(pcm, session.sample_rate), 1),
                             sample_rate=session.sample_rate,
                         )
                         await _send_json({"type": "status", "stage": "processing", "detail": "检测到停顿，开始识别"})
@@ -1052,7 +1113,8 @@ async def handle_voice_ws(ws):
 
                     elif action == "end":
                         if session:
-                            end_session(session.session_id, end_reason="manual")
+                            end_session(session.session_id,
+                                        end_reason="manual")
                             await _send_json({
                                 "type": "session_end",
                                 "turn_count": len(session.history),

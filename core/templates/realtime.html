@@ -127,6 +127,9 @@
     font-weight: 650;
     color: rgba(247, 254, 252, 0.88);
   }
+  .hero-link {
+    text-decoration: none;
+  }
   .surface-card {
     margin: 0 2px 14px;
     padding: 16px 16px 15px;
@@ -650,9 +653,9 @@
       <div class="navbar page-navbar">
         <div class="navbar-bg"></div>
         <div class="navbar-inner sliding">
-          <div class="left"><a href="/mobile" class="link" style="color:#fff">对讲机</a></div>
+          <div class="left"><a href="/mobile/upload" class="link" id="altModeLink" style="color:#fff">上传版</a></div>
           <div class="title">雄达物流客户陪练</div>
-          <div class="right"><span class="badge color-green" style="font-size:12px">实时</span></div>
+          <div class="right"><span class="badge color-green" id="modeBadge" style="font-size:12px">实时</span></div>
         </div>
       </div>
 
@@ -662,8 +665,10 @@
             <div class="hero-kicker">雄达物流</div>
             <div class="hero-title">客户陪练</div>
             <div class="hero-meta">
-              <span class="hero-chip">实时模式</span>
+              <span class="hero-chip" id="modeChip">实时模式</span>
               <span class="hero-chip">美国线训练</span>
+              <a class="hero-chip hero-link" href="/mobile/compat">兼容检测</a>
+              <a class="hero-chip hero-link" href="/realtime">经典实时</a>
             </div>
           </section>
 
@@ -770,6 +775,9 @@ const app = new Framework7({
 });
 
 const $$ = Dom7;
+const isMobileOmni = location.pathname === '/mobile' || location.pathname.startsWith('/mobile/');
+const wsPath = isMobileOmni ? '/ws/mobile-omni' : '/ws/voice';
+const sessionPrefix = isMobileOmni ? 'omni' : 'ws';
 
 // ── DOM refs ──
 const $statusBadge = $$('#statusBadge');
@@ -781,6 +789,19 @@ const $stageSelect = $$('#stageSelect');
 const $difficultySelect = $$('#difficultySelect');
 const $voiceSelect = $$('#voiceSelect');
 const $personaRoleline = $$('#personaRoleline');
+const $modeBadge = $$('#modeBadge');
+const $modeChip = $$('#modeChip');
+const $altModeLink = $$('#altModeLink');
+
+if (isMobileOmni) {
+  $modeBadge.text('Omni');
+  $modeChip.text('Omni 实时');
+  $altModeLink.attr('href', '/mobile/upload').text('上传版');
+} else {
+  $modeBadge.text('经典实时');
+  $modeChip.text('ASR + LLM + TTS');
+  $altModeLink.attr('href', '/mobile').text('Omni版');
+}
 
 // ── Messages ──
 const messages = app.messages.create({
@@ -876,8 +897,10 @@ let scriptProcessor = null; let silentGain = null;
 let wsReconnectCount = 0; const WS_MAX = 5;
 let clientSpeechActive = false; let clientFlushSent = false;
 let clientSpeechAt = 0; let clientLastVoiceAt = 0; let clientFlushReadyAt = 0; let clientLastFlushAt = 0; let lastLevelAt = 0;
+let omniTurnDetection = isMobileOmni ? 'server_vad' : 'manual';
 
 function resetClientSpeech() { clientSpeechActive = false; clientFlushSent = false; clientSpeechAt = 0; clientLastVoiceAt = 0; clientFlushReadyAt = 0; }
+function usesOmniServerVad() { return isMobileOmni && omniTurnDetection !== 'manual'; }
 
 const playQueue = []; let playing = false; let nextTtsAt = 0;
 const activeSources = new Set(); let ttsOpen = false; let ttsDone = false; let ttsGain = null;
@@ -937,7 +960,7 @@ async function startMic() {
       if (!clientSpeechActive) { clientSpeechActive = true; clientFlushSent = false; clientSpeechAt = now; }
       clientFlushReadyAt = 0;
       if (rms >= SPEECH_GATE) clientLastVoiceAt = now;
-    } else if (clientSpeechActive && !clientFlushSent && now - clientLastVoiceAt >= SILENCE_MS && now - clientSpeechAt >= MIN_SPEECH_MS) {
+    } else if (!usesOmniServerVad() && clientSpeechActive && !clientFlushSent && now - clientLastVoiceAt >= SILENCE_MS && now - clientSpeechAt >= MIN_SPEECH_MS) {
       const utteranceAge = now - clientSpeechAt;
       const requiredSilence = utteranceAge < SHORT_UTTERANCE_MS ? SHORT_SILENCE_MS : SILENCE_MS;
       if (now - clientLastVoiceAt < requiredSilence) return;
@@ -951,7 +974,7 @@ async function startMic() {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'control', action: 'flush' }));
       }
     }
-    if (rms < RMS_GATE) return;
+    if (rms < RMS_GATE && !(usesOmniServerVad() && clientSpeechActive)) return;
     const int16 = new Int16Array(input.length);
     for (let i = 0; i < input.length; i++) int16[i] = Math.max(-32768, Math.min(32767, input[i] * 32768 * 0.85));
     if (now - lastLevelAt > 250) { $interimText.text('音量 ' + '▮'.repeat(Math.min(10, Math.round(rms * 180))) + '▯'.repeat(Math.max(0, 10 - Math.round(rms * 180)))); lastLevelAt = now; }
@@ -971,7 +994,7 @@ function stopMic() {
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(proto + '//' + location.host + '/ws/voice');
+  ws = new WebSocket(proto + '//' + location.host + wsPath);
   ws.binaryType = 'arraybuffer'; state.wsState = 'connecting';
   ws.onopen = () => { wsReconnectCount = 0; state.wsState = 'connected'; resetClientSpeech();
     ws.send(JSON.stringify({ type: 'control', action: 'start', session_id: state.sessionId, config: { stage_id: state.stage, difficulty_id: state.difficulty, voice_id: state.voice, sample_rate: audioCtx ? audioCtx.sampleRate : REQUESTED_SR } }));
@@ -1022,7 +1045,9 @@ function handleMsg(msg) {
     case 'state_change': app.toast.show({ text: '客户状态: ' + (msg.from||'?') + ' → ' + (msg.to||'?'), position: 'top', closeTimeout: 2500 }); break;
     case 'session_info': break;
     case 'session_end': setStatus('idle', '会话结束，共' + (msg.turn_count||0) + '轮'); state.active = false; stopMic(); setConfigDisabled(false); $actionBtn.removeClass('stop').addClass('start').text('开始对话'); loadHistory(); break;
-    case 'ready': break;
+    case 'ready':
+      if (msg.turn_detection) omniTurnDetection = msg.turn_detection;
+      break;
     case 'error': setStatus('error', msg.message); break;
   }
 }
@@ -1038,7 +1063,7 @@ async function toggleSession() {
     try {
       await unlockAudio(); await startMic();
       resetPanels();
-      state.sessionId = 'ws-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+      state.sessionId = sessionPrefix + '-' + Date.now() + '-' + Math.random().toString(16).slice(2);
       connectWS(); state.active = true; setStatus('listening');
       setConfigDisabled(true);
       $actionBtn.removeClass('start').addClass('stop').text('结束对话');

@@ -1,9 +1,10 @@
 """
-app_new_wechat.py — 移动 H5 录音上传版训练入口
+app_new_wechat.py — 移动 H5 训练入口
 
 FastAPI 应用，提供移动 H5 页面和后端接口：
-- /mobile:          H5 录音训练页面（浏览器录音 → 上传 → ASR → LLM → TTS → 播放）
-- /realtime:        实时 WebSocket 语音模式入口（重定向到 WebSocket 页面）
+- /mobile:          H5 Omni 实时语音页面（浏览器 PCM → Qwen-Omni → 文本 + 音频）
+- /mobile/upload:   H5 录音上传兼容页面（浏览器录音 → 上传 → ASR → LLM → TTS → 播放）
+- /realtime:        经典实时 WebSocket 语音模式（VAD → ASR → LLM → TTS）
 - /api/training/config:   获取训练配置（阶段、难度、音色选项）
 - /api/training/voice-turn: 处理录音上传，返回客户回复文本和音频
 - /ws/audio-probe:  WebSocket 音频探针（最小验证）
@@ -11,7 +12,7 @@ FastAPI 应用，提供移动 H5 页面和后端接口：
 
 与桌面版（app_new_web）的区别：
 - 桌面版使用 WebRTC 实时流，适合 PC 浏览器
-- 移动版使用录音上传模式，适合手机 H5 / 企业微信
+- 移动版优先使用 Omni WebSocket 代理，保留录音上传兼容入口
 """
 
 from __future__ import annotations
@@ -31,8 +32,10 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 try:
     from .voice_ws import handle_audio_probe, handle_voice_ws
+    from .omni_voice_ws import handle_mobile_omni_ws
 except ImportError:
     from voice_ws import handle_audio_probe, handle_voice_ws
+    from omni_voice_ws import handle_mobile_omni_ws
 
 try:
     from .conversation_store import get_session, get_session_turns
@@ -50,7 +53,7 @@ try:
     )
     from .training_config import difficulty_choices, stage_choices, voice_choices
     from .training_config import resolve_training, _label
-    from .case_loader import get_case, find_cases, case_count as get_case_count
+    from .case_loader import get_case, get_case_summary, find_cases, case_count as get_case_count, all_business_lines, rank_cases_best
     from .training_data_context import summarize_case_assets
     from .conversation_store import recent_completed_sessions
 except ImportError:
@@ -69,13 +72,35 @@ except ImportError:
     )
     from training_config import difficulty_choices, stage_choices, voice_choices
     from training_config import resolve_training, _label
-    from case_loader import get_case, find_cases, case_count as get_case_count
+    from case_loader import get_case, get_case_summary, find_cases, case_count as get_case_count, all_business_lines, rank_cases_best
     from training_data_context import summarize_case_assets
     from conversation_store import recent_completed_sessions
 
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
+INDUSTRY_CHOICES = [
+    {"label": "🌐 不限", "value": ""},
+    {"label": "🛒 跨境电商", "value": "cross_border_ecommerce"},
+    {"label": "🏭 制造工厂", "value": "manufacturer"},
+    {"label": "📦 贸易公司", "value": "trading_company"},
+    {"label": "🧾 传统外贸", "value": "traditional_trade"},
+    {"label": "🏬 海外仓/FBA", "value": "overseas_warehouse_fba"},
+]
+SUB_INDUSTRY_CHOICES = [
+    {"label": "不限", "value": ""},
+    {"label": "机械设备", "value": "machinery_equipment"},
+    {"label": "食品饮料", "value": "food_beverage"},
+    {"label": "玻璃设备", "value": "glass_equipment"},
+    {"label": "家居建材", "value": "home_building_materials"},
+    {"label": "电子电器", "value": "electronics"},
+    {"label": "汽配零件", "value": "auto_parts"},
+    {"label": "服装纺织", "value": "apparel_textile"},
+    {"label": "医疗器械", "value": "medical_devices"},
+    {"label": "化工原料", "value": "chemical_materials"},
+    {"label": "户外用品", "value": "outdoor_goods"},
+    {"label": "美妆个护", "value": "beauty_personal_care"},
+]
 
 
 def _render_template(name: str) -> HTMLResponse:
@@ -84,6 +109,27 @@ def _render_template(name: str) -> HTMLResponse:
     if not path.exists():
         raise HTTPException(404, f"模板 {name} 不存在")
     return HTMLResponse(path.read_text(encoding="utf-8"))
+
+
+# ── 配置白名单（防前端注入） ──────────────────────────
+def _sanitize_config(raw: dict) -> dict:
+    """只保留白名单内的字段，过滤前端传入的任意值。"""
+    stages = {s[1] for s in stage_choices()}
+    diffs = {d[1] for d in difficulty_choices()}
+    voices = {v[1] for v in voice_choices()}
+    blines = set(all_business_lines())
+    industries = {item["value"] for item in INDUSTRY_CHOICES if item["value"]}
+    sub_industries = {item["value"]
+                      for item in SUB_INDUSTRY_CHOICES if item["value"]}
+    clean = {}
+    for key, valid_set in [
+        ("stage_id", stages), ("difficulty_id", diffs), ("voice_id", voices),
+            ("industry", industries), ("sub_industry", sub_industries),
+            ("business_line", blines), ("case_id", None)]:
+        val = str(raw.get(key, "")).strip()
+        if val and (valid_set is None or val in valid_set):
+            clean[key] = val
+    return clean
 
 
 app = FastAPI(title="Mobile H5 Training Prototype")
@@ -596,7 +642,17 @@ async def index():
 
 @app.get("/mobile")
 async def mobile_page():
+    return _render_template("realtime")
+
+
+@app.get("/mobile/upload")
+async def mobile_upload_page():
     return _render_template("mobile")
+
+
+@app.get("/mobile/compat")
+async def mobile_compat_page():
+    return _render_template("mobile_compat")
 
 
 @app.get("/api/training/config")
@@ -605,6 +661,9 @@ async def training_config():
         "stages": choice_payload(stage_choices()),
         "difficulties": choice_payload(difficulty_choices()),
         "voices": choice_payload(voice_choices()),
+        "industries": INDUSTRY_CHOICES,
+        "sub_industries": SUB_INDUSTRY_CHOICES,
+        "business_lines": all_business_lines(),
         "defaults": {
             "stage_id": os.getenv("TRAINING_STAGE_ID", "cold_call"),
             "difficulty_id": os.getenv("TRAINING_DIFFICULTY_ID", "easy"),
@@ -683,13 +742,15 @@ def _resolve_case_for_wechat(
     stage_id: str,
     difficulty_id: str,
     case_id: str | None = None,
+    business_line: str | None = None,
 ):
     """解析训练配置并匹配案例（wechat 版轻量实现）。"""
     stage, customer, difficulty = resolve_training(
         stage_id, None, difficulty_id)
     case = get_case(case_id) if case_id else None
     if not case:
-        candidates = find_cases(_label(stage), _label(difficulty))
+        candidates = find_cases(
+            _label(stage), _label(difficulty), business_line)
         case = random.choice(candidates) if candidates else None
     return stage, customer, difficulty, case
 
@@ -699,10 +760,16 @@ async def api_persona(
     stage_id: str = "cold_call",
     difficulty_id: str = "easy",
     voice_id: str = "longsanshu_v3",
+    business_line: str = "",
+    case_id: str = "",
 ):
     try:
         stage, customer, difficulty, case = _resolve_case_for_wechat(
-            stage_id, difficulty_id)
+            stage_id,
+            difficulty_id,
+            case_id=case_id or None,
+            business_line=business_line or None,
+        )
         voice = resolve_voice(voice_id)
         assets = summarize_case_assets(case)
         return {
@@ -728,9 +795,16 @@ async def api_persona(
 async def api_training_assets(
     stage_id: str = "cold_call",
     difficulty_id: str = "easy",
+    business_line: str = "",
+    case_id: str = "",
 ):
     try:
-        _, _, _, case = _resolve_case_for_wechat(stage_id, difficulty_id)
+        _, _, _, case = _resolve_case_for_wechat(
+            stage_id,
+            difficulty_id,
+            case_id=case_id or None,
+            business_line=business_line or None,
+        )
         return summarize_case_assets(case)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -748,6 +822,12 @@ async def ws_audio_probe(ws: WebSocket):
 async def ws_voice(ws: WebSocket):
     """实时语音管道：VAD → ASR → LLM → TTS → 流式下发。"""
     await handle_voice_ws(ws)
+
+
+@app.websocket("/ws/mobile-omni")
+async def ws_mobile_omni(ws: WebSocket):
+    """Mobile Omni realtime pipeline: browser PCM ↔ Qwen-Omni ↔ browser PCM."""
+    await handle_mobile_omni_ws(ws)
 
 
 # ── 实时模式 H5 页面 ─────────────────────────────────────
@@ -1862,10 +1942,75 @@ async def session_turns_api(session_id: str):
     ]
 
 
+@app.get("/api/training/resolve-case")
+async def resolve_case(stage_id: str = "", difficulty_id: str = "", business_line: str = "", industry: str = "", sub_industry: str = ""):
+    cfg = _sanitize_config(
+        {"stage_id": stage_id, "difficulty_id": difficulty_id, "business_line": business_line,
+         "industry": industry, "sub_industry": sub_industry})
+    stage_id = cfg.get("stage_id") or os.getenv(
+        "TRAINING_STAGE_ID", "cold_call")
+    difficulty_id = cfg.get("difficulty_id") or os.getenv(
+        "TRAINING_DIFFICULTY_ID", "easy")
+    business_line = cfg.get("business_line", "")
+    industry = cfg.get("industry", "")
+    sub_industry = cfg.get("sub_industry", "")
+    result = rank_cases_best(stage_id, difficulty_id,
+                             business_line, industry, sub_industry)
+    return result or {"case_id": None, "candidate_count": 0, "score": 0, "score_breakdown": {}, "top_candidates": [], "persona": {}}
+
+
+@app.get("/api/training/session-summary")
+async def session_summary(session_id: str = ""):
+    if not session_id:
+        raise HTTPException(400, "缺少 session_id")
+    sess = get_session(session_id)
+    if not sess:
+        raise HTTPException(404, "会话不存在")
+    turns = get_session_turns(session_id)
+    case = get_case(sess.get("case_id")) if sess.get("case_id") else None
+    evaluation = sess.get("evaluation") or {}
+    dim_scores = evaluation.get("dimension_scores", []) if isinstance(
+        evaluation, dict) else []
+    return {
+        "session": {"session_id": sess.get("session_id"), "turn_count": sess.get("turn_count"),
+                    "completed_at": sess.get("completed_at"), "final_state": sess.get("final_state"),
+                    "is_success": bool(sess.get("is_success"))},
+        "case": {"case_id": (case or {}).get("case_id"), "scene": (case or {}).get("scene"),
+                 "customer_name": ((case or {}).get("customer_role_card") or {}).get("name", ""),
+                 "training_type": sess.get("stage_id", ""), "difficulty": sess.get("difficulty_id", "")},
+        "evaluation": {"total_score": evaluation.get("total_score") if isinstance(evaluation, dict) else None,
+                       "dimension_scores": dim_scores,
+                       "strengths": evaluation.get("strengths", []) if isinstance(evaluation, dict) else [],
+                       "improvements": evaluation.get("improvements", []) if isinstance(evaluation, dict) else []},
+        "turns": [{"turn_index": t.get("turn_index"), "user_text": t.get("user_text"),
+                   "assistant_text": t.get("assistant_text"), "created_at": t.get("created_at")} for t in turns],
+    }
+
+
+# ── 三页面架构路由 ──────────────────────────────────
+@app.get("/wechat/config")
+async def wechat_config_page():
+    return _render_template("wechat_config")
+
+
+@app.get("/wechat/chat")
+async def wechat_chat_page():
+    return _render_template("wechat_chat")
+
+
+@app.get("/wechat/score")
+async def wechat_score_page():
+    return _render_template("wechat_score")
+
+
 if __name__ == "__main__":
     host = os.getenv("WECHAT_APP_HOST", "127.0.0.1")
     port = int(os.getenv("WECHAT_APP_PORT", "8511"))
-    print(f"\n  http://{host}:{port}/mobile      |  H5 对讲机模式（录音上传）")
-    print(f"  http://{host}:{port}/realtime    |  实时 WebSocket 语音模式")
-    print(f"  http://{host}:{port}/debug/status  |  调试状态\n")
+    print(f"\n  http://{host}:{port}/wechat/config   |  三页面 — 训练配置")
+    print(f"  http://{host}:{port}/wechat/chat     |  三页面 — 对话训练")
+    print(f"  http://{host}:{port}/wechat/score    |  三页面 — 训练评分")
+    print(f"  http://{host}:{port}/mobile          |  H5 Omni 实时语音")
+    print(f"  http://{host}:{port}/mobile/upload   |  H5 录音上传兼容模式")
+    print(f"  http://{host}:{port}/realtime        |  经典 ASR/LLM/TTS 实时语音")
+    print(f"  http://{host}:{port}/debug/status    |  调试状态\n")
     uvicorn.run(app, host=host, port=port, reload=False)

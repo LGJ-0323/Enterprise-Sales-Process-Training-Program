@@ -1,0 +1,823 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>对话训练 · 雄达物流</title>
+<style>
+  :root {
+    --brand: #0f8f83;
+    --brand-deep: #0a6158;
+    --ink: #192330;
+    --muted: #66778d;
+    --line: rgba(15, 23, 42, 0.08);
+    --panel: rgba(255, 255, 255, 0.92);
+    --page-a: #f4f8f4;
+    --page-b: #ecf3f0;
+    --warn: #b42318;
+    --shadow-lg: 0 18px 42px rgba(15, 23, 42, 0.08);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    min-height: 100%;
+    background:
+      radial-gradient(circle at top left, rgba(15, 143, 131, 0.15), transparent 30%),
+      radial-gradient(circle at top right, rgba(14, 165, 233, 0.12), transparent 26%),
+      linear-gradient(180deg, var(--page-a), var(--page-b));
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    letter-spacing: 0;
+  }
+  .page-content {
+    min-height: 100vh;
+    padding: 12px 0 calc(104px + env(safe-area-inset-bottom));
+    display: flex;
+    justify-content: center;
+  }
+  .page-shell {
+    width: min(calc(100vw - 10px), 960px);
+  }
+  .top-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 2px 12px;
+  }
+  .back-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 36px;
+    padding: 0 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(15, 143, 131, 0.16);
+    background: rgba(255,255,255,0.72);
+    color: var(--brand-deep);
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 800;
+  }
+  .page-title {
+    flex: 1;
+    min-width: 0;
+    text-align: right;
+    color: var(--brand-deep);
+    font-size: 15px;
+    font-weight: 900;
+  }
+  .module-stack {
+    display: grid;
+    gap: 14px;
+  }
+  .module-bubble {
+    position: relative;
+    overflow: hidden;
+    margin: 0 2px;
+    padding: 16px;
+    border: 1px solid rgba(15, 23, 42, 0.06);
+    border-radius: 24px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.94), rgba(247,250,249,0.88));
+    box-shadow: var(--shadow-lg);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+  }
+  .module-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .module-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 12px;
+    border-radius: 999px;
+    background: rgba(15, 143, 131, 0.08);
+    border: 1px solid rgba(15, 143, 131, 0.12);
+    font-size: 12px;
+    font-weight: 800;
+    color: var(--brand-deep);
+  }
+  .module-pill::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--brand);
+    box-shadow: 0 0 0 5px rgba(15, 143, 131, 0.14);
+  }
+  .surface-note {
+    font-size: 12px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .status-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 2px;
+    padding: 12px 14px;
+    border-radius: 18px;
+    background: rgba(255,255,255,0.76);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 800;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+  }
+  .status-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 999px;
+    background: #94a3b8;
+  }
+  .status-badge.listening .status-dot {
+    background: #22c55e;
+    animation: pulse-dot 1.4s infinite;
+  }
+  .status-badge.processing .status-dot {
+    background: #f59e0b;
+    animation: pulse-dot .7s infinite;
+  }
+  .status-badge.speaking .status-dot { background: #3b82f6; }
+  .status-badge.error .status-dot { background: var(--warn); }
+  @keyframes pulse-dot { 0%,100%{ opacity: 1; } 50%{ opacity: .25; } }
+  .persona-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+  }
+  .persona-avatar {
+    width: 64px;
+    height: 64px;
+    border-radius: 20px;
+    position: relative;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 50% 30%, #ffe2c7 0 18%, transparent 19%),
+      linear-gradient(160deg, rgba(15, 143, 131, 0.16), rgba(59, 130, 246, 0.11));
+    border: 1px solid rgba(15, 143, 131, 0.14);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.62);
+    flex: none;
+  }
+  .persona-avatar::before {
+    content: "";
+    position: absolute;
+    width: 28px;
+    height: 28px;
+    left: 18px;
+    top: 13px;
+    border-radius: 50%;
+    background: #ffcfad;
+    box-shadow: inset 0 -5px 0 rgba(151, 71, 44, 0.08);
+  }
+  .persona-avatar::after {
+    content: "";
+    position: absolute;
+    width: 44px;
+    height: 25px;
+    left: 10px;
+    bottom: 7px;
+    border-radius: 18px 18px 8px 8px;
+    background: linear-gradient(135deg, #0f8f83, #0a6158);
+  }
+  .persona-copy {
+    min-width: 0;
+    flex: 1;
+  }
+  .persona-name {
+    font-size: 17px;
+    font-weight: 900;
+    color: var(--ink);
+  }
+  .persona-meta {
+    margin-top: 3px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  .persona-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin-top: 10px;
+  }
+  .persona-tag {
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: rgba(15, 143, 131, 0.08);
+    border: 1px solid rgba(15, 143, 131, 0.12);
+    color: var(--brand-deep);
+    font-size: 12px;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+  .conversation {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 420px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 2px 2px 10px;
+  }
+  .placeholder {
+    width: 100%;
+    min-height: 360px;
+    padding: 28px 18px;
+    border-radius: 20px;
+    border: 1px solid var(--line);
+    background: rgba(255,255,255,0.74);
+    color: var(--muted);
+    font-size: 13px;
+    text-align: center;
+    display: grid;
+    place-items: center;
+  }
+  .chat-row {
+    display: flex;
+  }
+  .chat-row.customer { justify-content: flex-start; }
+  .chat-row.sales { justify-content: flex-end; }
+  .chat-bubble {
+    max-width: min(82%, 620px);
+    border-radius: 20px;
+    padding: 12px 14px;
+    line-height: 1.6;
+    font-size: 15px;
+    word-break: break-word;
+  }
+  .chat-row.customer .chat-bubble {
+    border-bottom-left-radius: 7px;
+    background: #fff;
+    border: 1px solid var(--line);
+    color: var(--ink);
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.05);
+  }
+  .chat-row.sales .chat-bubble {
+    border-bottom-right-radius: 7px;
+    background: linear-gradient(135deg, #0f8f83, #0a6158);
+    color: #fff;
+    box-shadow: 0 10px 22px rgba(15, 143, 131, 0.22);
+  }
+  .chat-name {
+    margin-bottom: 4px;
+    font-size: 11px;
+    font-weight: 850;
+    opacity: .68;
+  }
+  .interim-text {
+    min-height: 20px;
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+  }
+  .fab-btn {
+    position: fixed;
+    left: 50%;
+    bottom: calc(24px + env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    width: min(calc(100vw - 40px), 420px);
+    min-height: 56px;
+    border: 0;
+    border-radius: 999px;
+    background: linear-gradient(135deg, #0f8f83, #0a6158);
+    color: white;
+    font-size: 17px;
+    font-weight: 900;
+    box-shadow: 0 18px 36px rgba(15, 143, 131, 0.28);
+  }
+  .fab-btn.stop {
+    background: linear-gradient(135deg, #ef4444, #b42318);
+    box-shadow: 0 18px 36px rgba(180, 35, 24, 0.22);
+  }
+</style>
+</head>
+<body>
+<main class="page-content">
+  <div class="page-shell">
+    <div class="top-bar">
+      <a class="back-link" href="/wechat/config">返回配置</a>
+      <div class="page-title">实时对话训练</div>
+    </div>
+
+    <div class="module-stack">
+      <div class="status-badge idle" id="statusBadge">
+        <span class="status-dot"></span>
+        <span id="statusText">准备就绪，点击开始对话</span>
+      </div>
+
+      <section class="module-bubble" id="personaCard">
+        <div class="module-head">
+          <span class="module-pill">客户画像</span>
+          <span class="surface-note" id="caseMeta"></span>
+        </div>
+        <div class="persona-row">
+          <div class="persona-avatar" aria-hidden="true"></div>
+          <div class="persona-copy">
+            <div class="persona-name" id="personaName">正在加载客户</div>
+            <div class="persona-meta" id="personaMeta">根据你的配置匹配本轮客户画像。</div>
+            <div class="persona-tags" id="personaTags"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="module-bubble">
+        <div class="module-head">
+          <span class="module-pill">对话</span>
+          <span class="surface-note" id="turnInfo"></span>
+        </div>
+        <div class="conversation" id="conversation">
+          <div class="placeholder">点击下方按钮后，系统会连接实时语音通道。</div>
+        </div>
+        <div class="interim-text" id="interimText"></div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<button class="fab-btn" id="actionBtn" type="button">开始对话</button>
+
+<script>
+const params = new URLSearchParams(location.search);
+const state = {
+  sessionId: params.get("session_id") || ("ws-" + Date.now() + "-" + Math.random().toString(16).slice(2)),
+  stageId: params.get("stage_id") || "cold_call",
+  diffId: params.get("difficulty_id") || "easy",
+  voiceId: params.get("voice_id") || "longsanshu_v3",
+  bizLine: params.get("business_line") || "",
+  industry: params.get("industry") || "",
+  subIndustry: params.get("sub_industry") || "",
+  industryLabel: params.get("industry_label") || "",
+  subIndustryLabel: params.get("sub_industry_label") || "",
+  bizLineLabel: params.get("business_line_label") || "",
+  caseId: params.get("case_id") || "",
+  candidateCount: params.get("candidate_count") || "",
+  active: false,
+  ending: false,
+  turnCount: 0,
+};
+
+const $ = (id) => document.getElementById(id);
+
+function setStatus(stage, text) {
+  const label = text || ({
+    listening: "正在听你说话",
+    processing: "正在处理",
+    speaking: "客户正在回复",
+    idle: "准备就绪",
+    error: "连接异常",
+  }[stage] || "准备就绪");
+  const cls = ["listening", "processing", "speaking", "idle", "error"].includes(stage) ? stage : "idle";
+  $("statusBadge").className = "status-badge " + cls;
+  $("statusText").textContent = label;
+  $("interimText").textContent = stage === "listening" ? "正在听你说话..." : "";
+}
+
+function addBubble(role, text, name) {
+  const conversation = $("conversation");
+  const placeholder = conversation.querySelector(".placeholder");
+  if (placeholder) placeholder.remove();
+  const row = document.createElement("div");
+  row.className = "chat-row " + (role === "sales" ? "sales" : "customer");
+  const bubble = document.createElement("div");
+  bubble.className = "chat-bubble";
+  const label = document.createElement("div");
+  label.className = "chat-name";
+  label.textContent = name || (role === "sales" ? "我" : "客户");
+  const body = document.createElement("div");
+  body.textContent = text || "";
+  bubble.append(label, body);
+  row.appendChild(bubble);
+  conversation.appendChild(row);
+  row.scrollIntoView({ behavior: "smooth", block: "end" });
+}
+
+function resetConversation() {
+  state.turnCount = 0;
+  $("turnInfo").textContent = "";
+  $("conversation").innerHTML = '<div class="placeholder">正在建立训练会话...</div>';
+}
+
+function escapeHtml(value) {
+  return String(value == null ? "" : value).replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[ch]));
+}
+
+function renderPersonaTags() {
+  const tags = [
+    state.industryLabel ? "行业：" + state.industryLabel : "",
+    state.subIndustryLabel ? "细分：" + state.subIndustryLabel : "",
+    state.bizLineLabel ? "业务线：" + state.bizLineLabel : "",
+  ].filter(Boolean);
+  $("personaTags").innerHTML = tags.map((tag) => `<span class="persona-tag">${escapeHtml(tag)}</span>`).join("");
+}
+
+async function loadPersonaPreview() {
+  const query = new URLSearchParams({
+    stage_id: state.stageId,
+    difficulty_id: state.diffId,
+    voice_id: state.voiceId,
+  });
+  if (state.industry) query.set("industry", state.industry);
+  if (state.subIndustry) query.set("sub_industry", state.subIndustry);
+  if (state.bizLine) query.set("business_line", state.bizLine);
+  if (state.caseId) query.set("case_id", state.caseId);
+  try {
+    const res = await fetch("/api/persona?" + query.toString());
+    if (!res.ok) throw new Error("客户画像加载失败");
+    const data = await res.json();
+    $("personaName").textContent = data.name || "客户";
+    $("personaMeta").textContent = [data.role, data.style, data.desc].filter(Boolean).join(" · ");
+    $("caseMeta").textContent = [data.stage, data.difficulty, data.voice_label].filter(Boolean).join(" · ");
+  } catch (err) {
+    $("personaName").textContent = "客户画像";
+    $("personaMeta").textContent = err.message || "加载失败";
+  }
+}
+
+const REQUESTED_SR = 16000;
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+const SCRIPT_BUF = IS_IOS ? 1024 : 2048;
+const WS_HWM = IS_IOS ? 262144 : 131072;
+const TTS_SR = 24000;
+const TTS_LEAD = IS_IOS ? 0.06 : 0.03;
+const RMS_GATE = IS_IOS ? 0.0045 : 0.0025;
+const SPEECH_GATE = IS_IOS ? 0.009 : 0.0045;
+const SILENCE_MS = IS_IOS ? 760 : 550;
+const SHORT_UTTERANCE_MS = IS_IOS ? 1800 : 1200;
+const SHORT_SILENCE_MS = IS_IOS ? 980 : 700;
+const MIN_SPEECH_MS = IS_IOS ? 520 : 320;
+const FLUSH_CONFIRM_MS = IS_IOS ? 140 : 80;
+const FLUSH_COOLDOWN_MS = IS_IOS ? 900 : 650;
+
+let ws = null;
+let audioCtx = null;
+let stream = null;
+let scriptProcessor = null;
+let silentGain = null;
+let wsReconnectCount = 0;
+const WS_MAX = 5;
+let clientSpeechActive = false;
+let clientFlushSent = false;
+let clientSpeechAt = 0;
+let clientLastVoiceAt = 0;
+let clientFlushReadyAt = 0;
+let clientLastFlushAt = 0;
+let lastLevelAt = 0;
+
+function resetClientSpeech() {
+  clientSpeechActive = false;
+  clientFlushSent = false;
+  clientSpeechAt = 0;
+  clientLastVoiceAt = 0;
+  clientFlushReadyAt = 0;
+}
+
+const playQueue = [];
+let playing = false;
+let nextTtsAt = 0;
+const activeSources = new Set();
+let ttsOpen = false;
+let ttsDone = false;
+let ttsGain = null;
+
+function ensureTtsGain() {
+  if (!audioCtx) return false;
+  if (!ttsGain) {
+    ttsGain = audioCtx.createGain();
+    ttsGain.gain.value = 0.9;
+    ttsGain.connect(audioCtx.destination);
+  }
+  return true;
+}
+
+function enqueueAudio(buf) {
+  playQueue.push(buf);
+  drainQueue();
+}
+
+function drainQueue() {
+  if (!audioCtx || !ensureTtsGain() || playQueue.length === 0) {
+    if (activeSources.size === 0) {
+      playing = false;
+      if (ttsDone) {
+        ttsOpen = false;
+        ttsDone = false;
+        if (state.active) setStatus("listening");
+      }
+    }
+    return;
+  }
+  if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+  const now = audioCtx.currentTime;
+  if (!nextTtsAt || nextTtsAt < now + TTS_LEAD) nextTtsAt = now + TTS_LEAD;
+  playing = true;
+  while (playQueue.length > 0) {
+    const buf = playQueue.shift();
+    const f32 = new Float32Array(buf.length);
+    for (let i = 0; i < buf.length; i++) f32[i] = buf[i] / 32768;
+    const audioBuffer = audioCtx.createBuffer(1, f32.length, TTS_SR);
+    audioBuffer.getChannelData(0).set(f32);
+    const src = audioCtx.createBufferSource();
+    src.buffer = audioBuffer;
+    src.connect(ttsGain);
+    const sched = nextTtsAt;
+    nextTtsAt = sched + audioBuffer.duration;
+    activeSources.add(src);
+    src.onended = () => {
+      activeSources.delete(src);
+      if (activeSources.size === 0 && playQueue.length === 0) {
+        playing = false;
+        if (ttsDone) {
+          ttsOpen = false;
+          ttsDone = false;
+          if (state.active) setStatus("listening");
+        }
+      }
+    };
+    src.start(sched);
+  }
+}
+
+function beginTtsStream() {
+  resetTts(true);
+  ttsOpen = true;
+  ttsDone = false;
+}
+
+function finishTtsStream() {
+  ttsDone = true;
+  drainQueue();
+  if (!playing && playQueue.length === 0 && activeSources.size === 0) {
+    ttsOpen = false;
+    if (state.active) setStatus("listening");
+  }
+}
+
+function resetTts(hard) {
+  if (hard) {
+    activeSources.forEach((source) => {
+      try {
+        source.onended = null;
+        source.stop(0);
+      } catch (err) {}
+    });
+    activeSources.clear();
+  }
+  playQueue.length = 0;
+  playing = false;
+  nextTtsAt = 0;
+  ttsOpen = false;
+  ttsDone = false;
+}
+
+async function unlockAudio() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new AC({ latencyHint: "interactive" });
+  }
+  if (audioCtx.state === "suspended") await audioCtx.resume();
+  const buffer = audioCtx.createBuffer(1, 1, 22050);
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioCtx.destination);
+  source.start(0);
+}
+
+async function startMic() {
+  if (silentGain) {
+    silentGain.disconnect();
+    silentGain = null;
+  }
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      sampleRate: REQUESTED_SR,
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  });
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new AC({ latencyHint: "interactive", sampleRate: REQUESTED_SR });
+  }
+  const source = audioCtx.createMediaStreamSource(stream);
+  scriptProcessor = audioCtx.createScriptProcessor(SCRIPT_BUF, 1, 1);
+  scriptProcessor.onaudioprocess = (event) => {
+    if (!state.active || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const input = event.inputBuffer.getChannelData(0);
+    let sq = 0;
+    for (let i = 0; i < input.length; i++) sq += input[i] * input[i];
+    const rms = Math.sqrt(sq / input.length);
+    const now = Date.now();
+    if (rms >= RMS_GATE) {
+      if (!clientSpeechActive) {
+        clientSpeechActive = true;
+        clientFlushSent = false;
+        clientSpeechAt = now;
+      }
+      clientFlushReadyAt = 0;
+      if (rms >= SPEECH_GATE) clientLastVoiceAt = now;
+    } else if (clientSpeechActive && !clientFlushSent && now - clientLastVoiceAt >= SILENCE_MS && now - clientSpeechAt >= MIN_SPEECH_MS) {
+      const utteranceAge = now - clientSpeechAt;
+      const requiredSilence = utteranceAge < SHORT_UTTERANCE_MS ? SHORT_SILENCE_MS : SILENCE_MS;
+      if (now - clientLastVoiceAt < requiredSilence) return;
+      if (now - clientLastFlushAt < FLUSH_COOLDOWN_MS) return;
+      if (!clientFlushReadyAt) {
+        clientFlushReadyAt = now;
+      } else if (now - clientFlushReadyAt >= FLUSH_CONFIRM_MS) {
+        clientFlushSent = true;
+        clientFlushReadyAt = 0;
+        clientLastFlushAt = now;
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "control", action: "flush" }));
+      }
+    }
+    if (rms < RMS_GATE) return;
+    const int16 = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) int16[i] = Math.max(-32768, Math.min(32767, input[i] * 32768 * 0.85));
+    if (now - lastLevelAt > 250) {
+      const bars = Math.min(10, Math.round(rms * 180));
+      $("interimText").textContent = "音量 " + "■".repeat(bars) + "□".repeat(Math.max(0, 10 - bars));
+      lastLevelAt = now;
+    }
+    if (ws.bufferedAmount < WS_HWM) ws.send(int16.buffer);
+  };
+  source.connect(scriptProcessor);
+  silentGain = audioCtx.createGain();
+  silentGain.gain.value = 0;
+  scriptProcessor.connect(silentGain);
+  silentGain.connect(audioCtx.destination);
+}
+
+function stopMic() {
+  resetClientSpeech();
+  if (scriptProcessor) {
+    scriptProcessor.disconnect();
+    scriptProcessor = null;
+  }
+  if (silentGain) {
+    silentGain.disconnect();
+    silentGain = null;
+  }
+  if (stream) {
+    stream.getTracks().forEach((track) => track.stop());
+    stream = null;
+  }
+}
+
+function connectWS() {
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(protocol + "//" + location.host + "/ws/voice");
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => {
+    wsReconnectCount = 0;
+    resetClientSpeech();
+    ws.send(JSON.stringify({
+      type: "control",
+      action: "start",
+      session_id: state.sessionId,
+      config: {
+        stage_id: state.stageId,
+        difficulty_id: state.diffId,
+        voice_id: state.voiceId,
+        industry: state.industry,
+        sub_industry: state.subIndustry,
+        industry_label: state.industryLabel,
+        sub_industry_label: state.subIndustryLabel,
+        business_line: state.bizLine,
+        business_line_label: state.bizLineLabel,
+        case_id: state.caseId,
+        candidate_count: state.candidateCount,
+        sample_rate: audioCtx ? audioCtx.sampleRate : REQUESTED_SR,
+      },
+    }));
+  };
+  ws.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) {
+      enqueueAudio(new Int16Array(event.data));
+      return;
+    }
+    try {
+      handleMsg(JSON.parse(event.data));
+    } catch (err) {}
+  };
+  ws.onclose = () => {
+    wsReconnectCount++;
+    if (state.active && !state.ending && wsReconnectCount <= WS_MAX) {
+      setStatus("idle", "正在重连...");
+      setTimeout(() => {
+        if (state.active) connectWS();
+      }, Math.min(2000 * wsReconnectCount, 10000));
+    } else if (state.active && !state.ending) {
+      setStatus("error", "连接失败");
+    }
+  };
+  ws.onerror = () => setStatus("error", "WebSocket 错误");
+}
+
+function handleMsg(msg) {
+  switch (msg.type) {
+    case "status":
+      resetClientSpeech();
+      if (msg.stage === "speaking") beginTtsStream();
+      setStatus(msg.stage, msg.detail);
+      break;
+    case "persona":
+      $("personaName").textContent = msg.name || "客户";
+      $("personaMeta").textContent = [msg.role, msg.location, msg.style, msg.scene].filter(Boolean).join(" · ");
+      $("caseMeta").textContent = [msg.stage_label, msg.difficulty_label].filter(Boolean).join(" · ");
+      break;
+    case "goal":
+      if (msg.opening && $("conversation").querySelectorAll(".chat-row").length === 0) {
+        addBubble("customer", msg.opening, "客户");
+      }
+      break;
+    case "asr_partial":
+      $("interimText").textContent = "正在识别：" + (msg.text || "");
+      break;
+    case "asr_final":
+      resetClientSpeech();
+      $("interimText").textContent = "";
+      state.turnCount += 1;
+      $("turnInfo").textContent = state.turnCount + " 轮";
+      addBubble("sales", msg.text, "我");
+      break;
+    case "response_text":
+      addBubble("customer", msg.text, msg.guardrail ? "客户（已纠偏）" : "客户");
+      break;
+    case "tts_done":
+      finishTtsStream();
+      break;
+    case "session_info":
+      if (msg.turn_count != null) {
+        state.turnCount = msg.turn_count;
+        $("turnInfo").textContent = state.turnCount + " 轮";
+      }
+      break;
+    case "state_change":
+      $("caseMeta").textContent = "客户状态：" + (msg.to || "");
+      break;
+    case "session_end":
+      state.active = false;
+      state.ending = true;
+      stopMic();
+      resetTts(true);
+      setStatus("idle", "会话结束，正在进入评分");
+      $("actionBtn").classList.remove("stop");
+      $("actionBtn").textContent = "查看评分";
+      setTimeout(() => {
+        location.href = "/wechat/score?session_id=" + encodeURIComponent(state.sessionId);
+      }, 450);
+      break;
+    case "error":
+      setStatus("error", msg.message || "连接异常");
+      break;
+  }
+}
+
+async function toggleSession() {
+  const btn = $("actionBtn");
+  if (state.active) {
+    state.ending = true;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "control", action: "end" }));
+    }
+    setStatus("idle", "正在结束会话");
+    btn.disabled = true;
+    return;
+  }
+  try {
+    await unlockAudio();
+    await startMic();
+    resetConversation();
+    state.active = true;
+    state.ending = false;
+    btn.classList.add("stop");
+    btn.textContent = "结束对话";
+    setStatus("listening");
+    connectWS();
+  } catch (err) {
+    state.active = false;
+    setStatus("error", err.message || "启动失败");
+  }
+}
+
+$("actionBtn").addEventListener("click", toggleSession);
+renderPersonaTags();
+loadPersonaPreview();
+if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+  setStatus("error", "当前浏览器不支持麦克风");
+}
+</script>
+</body>
+</html>

@@ -361,6 +361,35 @@ def get_case(case_id: str | None) -> dict[str, Any] | None:
     return None
 
 
+def all_business_lines() -> list[str]:
+    """从 roleplay_cases.jsonl 提取所有业务线的去重列表。"""
+    return sorted(set(
+        str(c.get("business_line", ""))
+        for c in _load_all_cases()
+        if c.get("business_line")
+    ))
+
+
+def matching_case_count(training_type: str = "", difficulty: str = "", business_line: str = "") -> int:
+    """快速计算匹配的案例数（不构造列表）。"""
+    cases = _load_all_cases()
+    if not cases:
+        return 0
+    count = 0
+    for case in cases:
+        tt = str(case.get("training_type", ""))
+        diff = str(case.get("difficulty", ""))
+        bl = str(case.get("business_line", ""))
+        if training_type and not _type_matches(tt, training_type):
+            continue
+        if difficulty and not _diff_matches(diff, difficulty):
+            continue
+        if business_line and bl != business_line:
+            continue
+        count += 1
+    return count
+
+
 def get_case_summary(case: dict[str, Any]) -> dict[str, Any]:
     """提取案例的摘要信息，用于 Gradio 界面展示。"""
     role = case.get("customer_role_card", {})
@@ -385,6 +414,129 @@ def get_case_summary(case: dict[str, Any]) -> dict[str, Any]:
         "has_failure_conditions": bool(case.get("failure_conditions")),
         "has_difficulty_variants": bool(case.get("difficulty_variants")),
         "training_goal_count": len(case.get("training_goals", [])),
+    }
+
+
+def _load_case_tags() -> dict[str, dict[str, Any]]:
+    """加载 case_tags.jsonl（如果存在），返回 case_id -> tags 的映射。"""
+    tags_path = DOCS_DIR / "case_tags.jsonl"
+    if not tags_path.exists():
+        return {}
+    mapping = {}
+    try:
+        for line in tags_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                tag = json.loads(line)
+                cid = tag.get("case_id")
+                if cid:
+                    mapping[cid] = tag
+            except json.JSONDecodeError:
+                pass
+    except Exception:
+        pass
+    return mapping
+
+
+def rank_cases(
+    training_type: str,
+    difficulty: str,
+    business_line: str | None = None,
+    industry: str | None = None,
+    sub_industry: str | None = None,
+    top_k: int = 5,
+) -> list[dict[str, Any]]:
+    """加权打分匹配案例，按分数降序返回 top-N。
+
+    权重分配（阶段 25 + 难度 25 + 业务线 20 + 行业 15 + 细分行业 15 = 100）：
+    - stage + difficulty 不匹配 → 直接跳过（保底起评线）
+    - industry / sub_industry 仅在 case_tags.jsonl 存在时参与打分
+    - 无标签文件时自动退化为 training_type + difficulty 匹配
+    """
+    cases = _load_all_cases()
+    if not cases:
+        return []
+
+    tags = _load_case_tags()
+    scored = []
+    for case in cases:
+        tt = str(case.get("training_type", ""))
+        diff = str(case.get("difficulty", ""))
+        bl = str(case.get("business_line", ""))
+
+        # 阶段决定训练框架；难度不匹配仅作为 fallback 候选。
+        stage_match = _type_matches(tt, training_type)
+        diff_match = _diff_matches(diff, difficulty)
+        if not stage_match:
+            continue
+
+        breakdown = {
+            "stage": 25,
+            "difficulty": 25 if diff_match else 0,
+            "business_line": 20 if business_line and bl == business_line else 0,
+            "industry": 0,
+            "sub_industry": 0,
+        }
+
+        # 行业标签打分（仅在标签文件存在时生效）
+        if tags and (industry or sub_industry):
+            case_tag = tags.get(case.get("case_id"))
+            if case_tag:
+                if industry and case_tag.get("industry") == industry:
+                    breakdown["industry"] = 15
+                if sub_industry and case_tag.get("sub_industry") == sub_industry:
+                    breakdown["sub_industry"] = 15
+
+        score = sum(breakdown.values())
+        tier = 0 if diff_match else 1
+        scored.append((tier, case, score, breakdown))
+
+    total_count = len(scored)
+    scored.sort(key=lambda x: (x[0], -x[2]))
+    top = scored[:max(top_k, 1)]
+
+    # 构建返回结果
+    result = []
+    for _, case, score, breakdown in top[:max(top_k, 1)]:
+        summary = get_case_summary(case)
+        summary["_score"] = score
+        summary["_score_breakdown"] = breakdown
+        summary["_candidate_total"] = total_count
+        result.append(summary)
+    return result
+
+
+def rank_cases_best(
+    training_type: str,
+    difficulty: str,
+    business_line: str | None = None,
+    industry: str | None = None,
+    sub_industry: str | None = None,
+) -> dict[str, Any] | None:
+    """返回最高分的案例信息，附带评分明细。"""
+    ranked = rank_cases(training_type, difficulty,
+                        business_line, industry, sub_industry, top_k=5)
+    if not ranked:
+        return None
+    best = ranked[0]
+    candidate_count = int(best.get("_candidate_total") or len(ranked))
+    top_candidates = [
+        {k: v for k, v in item.items() if k != "_candidate_total"}
+        for item in ranked
+    ]
+    return {
+        "case_id": best.get("case_id"),
+        "candidate_count": candidate_count,
+        "score": best.get("_score"),
+        "score_breakdown": best.get("_score_breakdown") or {},
+        "top_candidates": top_candidates,
+        "persona": {
+            k: v
+            for k, v in best.items()
+            if k not in ("_score", "_score_breakdown", "_candidate_total")
+        },
     }
 
 

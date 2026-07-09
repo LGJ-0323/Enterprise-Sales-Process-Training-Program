@@ -13,6 +13,15 @@ P0: build_training_prompt_v2 + lru_cache
 """
 
 from __future__ import annotations
+from fastrtc.reply_on_pause import AlgoOptions, create_message
+from fastrtc.pause_detection.silero import SileroVadOptions
+from fastrtc import ReplyOnPause, Stream, audio_to_bytes
+from dashscope.audio.tts_v2 import AudioFormat, SpeechSynthesizer
+from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionResult
+from dashscope import Generation
+import numpy as np
+import gradio as gr
+import dashscope
 
 import io
 import json
@@ -80,19 +89,11 @@ _load_project_env(PROJECT_DIR / ".env")
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-FFMPEG_BIN = os.getenv("FFMPEG_BIN", r"D:\tools\ffmpeg\ffmpeg-master-latest-win64-gpl-shared\bin")
+FFMPEG_BIN = os.getenv(
+    "FFMPEG_BIN", r"D:\tools\ffmpeg\ffmpeg-master-latest-win64-gpl-shared\bin")
 if not shutil.which("ffmpeg") and os.path.exists(os.path.join(FFMPEG_BIN, "ffmpeg.exe")):
     os.environ["PATH"] = FFMPEG_BIN + os.pathsep + os.environ.get("PATH", "")
 
-import dashscope
-import gradio as gr
-import numpy as np
-from dashscope import Generation
-from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionResult
-from dashscope.audio.tts_v2 import AudioFormat, SpeechSynthesizer
-from fastrtc import ReplyOnPause, Stream, audio_to_bytes
-from fastrtc.pause_detection.silero import SileroVadOptions
-from fastrtc.reply_on_pause import AlgoOptions, create_message
 
 # ── 训练模块 ────────────────────────────────────────────
 try:
@@ -197,11 +198,15 @@ ASR_SAMPLE_RATE = _env_int("WEBRTC_ASR_SAMPLE_RATE", 16000)
 ASR_FORMAT = os.getenv("WEBRTC_ASR_FORMAT", "pcm").strip().lower()
 ASR_LEADING_SILENCE_MS = _env_int("WEBRTC_ASR_LEADING_SILENCE_MS", 350)
 ASR_TRAILING_SILENCE_MS = _env_int("WEBRTC_ASR_TRAILING_SILENCE_MS", 4500)
-ASR_MAX_SENTENCE_SILENCE_MS = _env_int("WEBRTC_ASR_MAX_SENTENCE_SILENCE_MS", 4500)
-ASR_SEMANTIC_PUNCTUATION_ENABLED = _env_bool("WEBRTC_ASR_SEMANTIC_PUNCTUATION_ENABLED", False)
-ASR_MULTI_THRESHOLD_MODE_ENABLED = _env_bool("WEBRTC_ASR_MULTI_THRESHOLD_MODE_ENABLED", True)
+ASR_MAX_SENTENCE_SILENCE_MS = _env_int(
+    "WEBRTC_ASR_MAX_SENTENCE_SILENCE_MS", 4500)
+ASR_SEMANTIC_PUNCTUATION_ENABLED = _env_bool(
+    "WEBRTC_ASR_SEMANTIC_PUNCTUATION_ENABLED", False)
+ASR_MULTI_THRESHOLD_MODE_ENABLED = _env_bool(
+    "WEBRTC_ASR_MULTI_THRESHOLD_MODE_ENABLED", True)
 ASR_USE_CALLBACK = _env_bool("WEBRTC_ASR_USE_CALLBACK", False)
-ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S = _env_float("WEBRTC_ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S", 12.0)
+ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S = _env_float(
+    "WEBRTC_ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S", 12.0)
 ASR_CALLBACK_GRACE_S = _env_float("WEBRTC_ASR_CALLBACK_GRACE_S", 3.0)
 ASR_CALLBACK_FRAME_BYTES = _env_int("WEBRTC_ASR_CALLBACK_FRAME_BYTES", 6400)
 ASR_SYNC_FALLBACK = _env_bool("WEBRTC_ASR_SYNC_FALLBACK", True)
@@ -209,13 +214,16 @@ ASR_CALLBACK_TIMEOUT_ERROR = "ASR callback timeout before first final sentence"
 ASR_EMPTY_NOTICE = "\u6211\u8fd9\u8fb9\u6ca1\u542c\u6e05\uff0c\u8bf7\u518d\u8bf4\u4e00\u904d\u3002"
 ASR_ERROR_NOTICE = "\u8bed\u97f3\u8bc6\u522b\u6682\u65f6\u5931\u8d25\uff0c\u8bf7\u518d\u8bf4\u4e00\u904d\u3002"
 VAD_AUDIO_CHUNK_DURATION = _env_float("WEBRTC_AUDIO_CHUNK_DURATION", 0.45)
-VAD_STARTED_TALKING_THRESHOLD = _env_float("WEBRTC_STARTED_TALKING_THRESHOLD", 0.18)
+VAD_STARTED_TALKING_THRESHOLD = _env_float(
+    "WEBRTC_STARTED_TALKING_THRESHOLD", 0.18)
 VAD_SPEECH_THRESHOLD = _env_float("WEBRTC_SPEECH_THRESHOLD", 0.12)
-VAD_MAX_CONTINUOUS_SPEECH_S = _env_float("WEBRTC_MAX_CONTINUOUS_SPEECH_S", 30.0)
+VAD_MAX_CONTINUOUS_SPEECH_S = _env_float(
+    "WEBRTC_MAX_CONTINUOUS_SPEECH_S", 30.0)
 VAD_THRESHOLD = _env_float("WEBRTC_VAD_THRESHOLD", 0.40)
 VAD_MIN_SPEECH_DURATION_MS = _env_int("WEBRTC_MIN_SPEECH_DURATION_MS", 300)
 VAD_MIN_SILENCE_DURATION_MS = _env_int("WEBRTC_MIN_SILENCE_DURATION_MS", 4500)
-VAD_REPLY_PAUSE_MS = _env_int("WEBRTC_REPLY_PAUSE_MS", VAD_MIN_SILENCE_DURATION_MS)
+VAD_REPLY_PAUSE_MS = _env_int(
+    "WEBRTC_REPLY_PAUSE_MS", VAD_MIN_SILENCE_DURATION_MS)
 VAD_SPEECH_PAD_MS = _env_int("WEBRTC_SPEECH_PAD_MS", 600)
 VAD_PREROLL_MS = _env_int("WEBRTC_PREROLL_MS", max(VAD_SPEECH_PAD_MS, 1500))
 
@@ -251,9 +259,11 @@ def set_active_stream_selection(
         active = dict(_ACTIVE_STREAM_SELECTION)
 
     stage_label = _choice_label(stage_choices(), active["stage_id"])
-    difficulty_label = _choice_label(difficulty_choices(), active["difficulty_id"])
+    difficulty_label = _choice_label(
+        difficulty_choices(), active["difficulty_id"])
     if active.get("case_id"):
-        set_active_case_for_combo(stage_label, difficulty_label, active["case_id"])
+        set_active_case_for_combo(
+            stage_label, difficulty_label, active["case_id"])
     return active
 
 
@@ -263,7 +273,8 @@ def get_active_stream_selection() -> dict:
 
 
 def set_status(stage: str, **kwargs):
-    LAST_STATUS.update({"time": datetime.now().isoformat(timespec="seconds"), "stage": stage, "error": "", **kwargs})
+    LAST_STATUS.update({"time": datetime.now().isoformat(
+        timespec="seconds"), "stage": stage, "error": "", **kwargs})
     print(f"[{LAST_STATUS['time']}] {stage}: {kwargs}", flush=True)
 
 
@@ -322,15 +333,18 @@ def _maybe_evaluate_completed_session(session_id: str, training: dict) -> None:
                 session_id=session_id,
                 case_id=training.get("case_id"),
                 source_call_id=training.get("source_call_id"),
-                training_type=training.get("training_type") or training.get("stage"),
+                training_type=training.get(
+                    "training_type") or training.get("stage"),
             )
             save_session_evaluation(session_id, evaluation)
             live_training = dict(LAST_STATUS.get("training") or {})
             live_training.update(training)
             live_training["session_id"] = session_id
-            set_status("evaluation_done", evaluation=evaluation, training=live_training)
+            set_status("evaluation_done", evaluation=evaluation,
+                       training=live_training)
         except Exception as exc:
-            set_status("evaluation_error", error=f"{type(exc).__name__}: {exc}")
+            set_status("evaluation_error",
+                       error=f"{type(exc).__name__}: {exc}")
         finally:
             with _EVAL_LOCK:
                 _EVAL_JOBS.discard(session_id)
@@ -343,25 +357,35 @@ def _maybe_evaluate_completed_session(session_id: str, training: dict) -> None:
 # ═══════════════════════════════════════════════════════
 
 def load_customer_profile() -> str:
-    try: return DEFAULT_PROFILE_PATH.read_text(encoding="utf-8").strip()
-    except OSError: return "你是一个中文语音模拟客户。每次 1-3 句话。"
+    try:
+        return DEFAULT_PROFILE_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "你是一个中文语音模拟客户。每次 1-3 句话。"
+
 
 def strip_spoken_identity(text: str, customer_name: str | None = None) -> str:
     cleaned = (text or "").strip()
-    if not cleaned: return ""
+    if not cleaned:
+        return ""
     escaped_name = re.escape(customer_name.strip()) if customer_name else ""
-    labels = ["客户","模拟客户","企业客户","企业人员","外贸主管","物流经理","供应链负责人","采购负责人","总经理","AI","助手"]
-    if escaped_name: labels.insert(0, escaped_name)
-    prefix = re.compile(rf"^\s*[（(【\[]?\s*(?:{'|'.join(labels)}|[\\u4e00-\\u9fff]{{1,4}}(?:女士|先生|经理|主管|总监|主任|负责人|总))\s*[）)】\]]?\s*[:：]\s*", re.IGNORECASE)
+    labels = ["客户", "模拟客户", "企业客户", "企业人员", "外贸主管",
+              "物流经理", "供应链负责人", "采购负责人", "总经理", "AI", "助手"]
+    if escaped_name:
+        labels.insert(0, escaped_name)
+    prefix = re.compile(
+        rf"^\s*[（(【\[]?\s*(?:{'|'.join(labels)}|[\\u4e00-\\u9fff]{{1,4}}(?:女士|先生|经理|主管|总监|主任|负责人|总))\s*[）)】\]]?\s*[:：]\s*", re.IGNORECASE)
     prev = None
-    while prev != cleaned: prev = cleaned; cleaned = prefix.sub("", cleaned).strip()
+    while prev != cleaned:
+        prev = cleaned
+        cleaned = prefix.sub("", cleaned).strip()
     return cleaned
 
 
 def _extract_json_object_text(text: str) -> str:
     cleaned = (text or "").strip()
     if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned,
+                         flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"\s*```$", "", cleaned).strip()
     if cleaned.startswith("{") and cleaned.endswith("}"):
         return cleaned
@@ -372,7 +396,8 @@ def _extract_json_object_text(text: str) -> str:
 
 
 def _json_string_value(text: str, key: str) -> str:
-    match = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)"', text or "", re.DOTALL)
+    match = re.search(
+        rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)"', text or "", re.DOTALL)
     if not match:
         return ""
     try:
@@ -426,7 +451,8 @@ def _history_for_prompt(session_id: str, limit: int = 8) -> list[dict]:
     except Exception:
         return []
     return [
-        {"user_text": turn.get("user_text", ""), "assistant_text": turn.get("assistant_text", "")}
+        {"user_text": turn.get("user_text", ""),
+         "assistant_text": turn.get("assistant_text", "")}
         for turn in turns
     ]
 
@@ -451,6 +477,7 @@ def _build_session_training_prompt(
     stage_id: str,
     difficulty_id: str,
     preferred_case_id: str | None = None,
+    business_line: str | None = None,
 ) -> tuple[str, dict, dict]:
     stage_label = _choice_label(stage_choices(), stage_id)
     difficulty_label = _choice_label(difficulty_choices(), difficulty_id)
@@ -458,13 +485,16 @@ def _build_session_training_prompt(
         session_id,
         stage_label,
         difficulty_label,
+        business_line=business_line,
         preferred_case_id=preferred_case_id,
         use_active_case=True,
     )
     case = get_case(context.get("case_id"))
     if not case:
-        prompt, summary = build_training_prompt_v2(stage_id, DEFAULT_CUSTOMER_ID, difficulty_id)
-        summary.update({"session_id": session_id, "case_id": None, "current_state": ""})
+        prompt, summary = build_training_prompt_v2(
+            stage_id, DEFAULT_CUSTOMER_ID, difficulty_id)
+        summary.update({"session_id": session_id,
+                       "case_id": None, "current_state": ""})
         return prompt, summary, context
 
     history = _history_for_prompt(session_id)
@@ -487,31 +517,42 @@ def _build_session_training_prompt(
 
 def is_role_reversed_sales_reply(text: str) -> bool:
     c = re.sub(r"\s+", "", text or "")
-    if not c: return False
-    phrases = ("我们是雄达物流","我是雄达物流","我们雄达物流","雄达物流这边","雄达物流的销售")
-    if any(p in c for p in phrases): return True
+    if not c:
+        return False
+    phrases = ("我们是雄达物流", "我是雄达物流", "我们雄达物流", "雄达物流这边", "雄达物流的销售")
+    if any(p in c for p in phrases):
+        return True
     return any(re.search(p, c) for p in (
         r"(想|想了解).{0,12}(你们|贵司).{0,24}(需求|发货|出货)",
         r"(你们|贵司).{0,12}(有没有|是否有).{0,24}(发货|出货|物流需求)",
     ))
 
+
 def is_hostile_or_confused_user_text(text: str) -> bool:
     c = re.sub(r"\s+", "", text or "")
-    return any(t in c for t in ("他妈","妈的","在说啥","什么鬼","搞什么","你在说什么","听不懂"))
+    return any(t in c for t in ("他妈", "妈的", "在说啥", "什么鬼", "搞什么", "你在说什么", "听不懂"))
+
 
 def build_customer_guardrail_reply(user_text: str, training: dict) -> str:
     t = user_text or ""
-    if is_hostile_or_confused_user_text(t): return "我这边听着有点乱。你是雄达物流的销售吧？有事就直接说重点。"
-    if any(w in t for w in ("价格","低","便宜")): return "价格低我会关注，但我更关心费用是不是透明。"
-    if "雄达物流" in t: return "嗯，你好。你们主要做哪条线？先说重点吧。"
+    if is_hostile_or_confused_user_text(t):
+        return "我这边听着有点乱。你是雄达物流的销售吧？有事就直接说重点。"
+    if any(w in t for w in ("价格", "低", "便宜")):
+        return "价格低我会关注，但我更关心费用是不是透明。"
+    if "雄达物流" in t:
+        return "嗯，你好。你们主要做哪条线？先说重点吧。"
     return "我这边时间不多。你先说说你们能解决什么具体问题？"
+
 
 def sanitize_recent_memory(memory_text: str) -> tuple[str, int]:
     kept, removed = [], 0
     for line in (memory_text or "").splitlines():
-        if "客户：" in line and is_role_reversed_sales_reply(line.split("客户：", 1)[1]): removed += 1; continue
+        if "客户：" in line and is_role_reversed_sales_reply(line.split("客户：", 1)[1]):
+            removed += 1
+            continue
         kept.append(line)
     return "\n".join(kept), removed
+
 
 def build_role_guard_prompt(customer_name: str | None) -> str:
     return (f"【最高优先级角色校验】\n- 你下一句必须是{customer_name or '当前客户'}作为企业客户的自然回应。\n- role=user 全部来自雄达物流销售；role=assistant 只能来自企业客户。\n- 禁止输出\"我们是雄达物流\"等销售话术。")
@@ -578,8 +619,10 @@ def refine_customer_reply(reply: str, user_text: str, memory_text: str, training
     if not cleaned:
         return cleaned
     compact = _norm_reply(cleaned)
-    recent = [_norm_reply(item) for item in _recent_customer_replies(memory_text)]
-    repeated = bool(compact and any(compact == item or compact in item or item in compact for item in recent if item))
+    recent = [_norm_reply(item)
+              for item in _recent_customer_replies(memory_text)]
+    repeated = bool(compact and any(
+        compact == item or compact in item or item in compact for item in recent if item))
     if repeated or _looks_low_value_reply(cleaned):
         return _fallback_customer_reply(user_text, training)
     return cleaned
@@ -588,13 +631,16 @@ def refine_customer_reply(reply: str, user_text: str, memory_text: str, training
 def synthesize_with_retry(response_text: str, voice_config: dict, attempts: int = 3) -> bytes:
     for attempt in range(1, attempts + 1):
         try:
-            s = SpeechSynthesizer(model=voice_config.get("model") or os.getenv("DASHSCOPE_TTS_MODEL","cosyvoice-v1"),
-                voice=voice_config.get("voice") or os.getenv("DASHSCOPE_TTS_VOICE","longxiaochun"),
-                format=AudioFormat.PCM_24000HZ_MONO_16BIT)
+            s = SpeechSynthesizer(model=voice_config.get("model") or os.getenv("DASHSCOPE_TTS_MODEL", "cosyvoice-v1"),
+                                  voice=voice_config.get("voice") or os.getenv(
+                                      "DASHSCOPE_TTS_VOICE", "longxiaochun"),
+                                  format=AudioFormat.PCM_24000HZ_MONO_16BIT)
             ab = s.call(response_text)
-            if ab: return ab
+            if ab:
+                return ab
         except Exception as exc:
-            set_status("tts_retry", error=f"{attempt}/{attempts}: {exc}"); time.sleep(0.4)
+            set_status("tts_retry", error=f"{attempt}/{attempts}: {exc}")
+            time.sleep(0.4)
     raise RuntimeError(f"TTS failed after {attempts} attempts")
 
 
@@ -621,7 +667,8 @@ class ReplyOnStablePause(ReplyOnPause):
         if max_samples <= 0:
             return
         previous = getattr(state, "_preroll_audio", None)
-        combined = audio if previous is None else np.concatenate((previous, audio))
+        combined = audio if previous is None else np.concatenate(
+            (previous, audio))
         if combined.size > max_samples:
             combined = combined[-max_samples:]
         setattr(state, "_preroll_audio", combined)
@@ -658,12 +705,14 @@ class ReplyOnStablePause(ReplyOnPause):
             return False
 
         state.buffer = None
-        current_duration = len(state.stream) / sampling_rate if state.stream is not None else 0.0
+        current_duration = len(state.stream) / \
+            sampling_rate if state.stream is not None else 0.0
         if current_duration >= self.algo_options.max_continuous_speech_s:
             return True
 
         if dur_vad < self.algo_options.speech_threshold:
-            stable_silence_s = getattr(state, "_stable_silence_s", 0.0) + duration
+            stable_silence_s = getattr(
+                state, "_stable_silence_s", 0.0) + duration
         else:
             stable_silence_s = 0.0
         setattr(state, "_stable_silence_s", stable_silence_s)
@@ -701,7 +750,8 @@ def _audio_level_metrics(audio: tuple[int, np.ndarray]) -> dict[str, object]:
         abs_pcm = np.abs(pcm)
         peak = int(np.max(abs_pcm))
         rms = float(np.sqrt(np.mean(np.square(pcm / 32768.0))))
-        dbfs = None if rms <= 0 else float(round(20 * np.log10(max(rms, 1e-9)), 1))
+        dbfs = None if rms <= 0 else float(
+            round(20 * np.log10(max(rms, 1e-9)), 1))
         return {"audio_peak": peak, "audio_rms": round(rms, 5), "audio_dbfs": dbfs}
     except Exception as exc:
         return {"audio_level_error": f"{type(exc).__name__}: {exc}"}
@@ -714,9 +764,11 @@ def _prepare_webrtc_asr_pcm(audio: tuple[int, np.ndarray]) -> tuple[str, list[st
 
     pcm_start = time.perf_counter()
     source_pcm = _audio_array_to_int16_mono(audio[1])
-    leading_samples = max(0, int(int(audio[0]) * ASR_LEADING_SILENCE_MS / 1000))
+    leading_samples = max(
+        0, int(int(audio[0]) * ASR_LEADING_SILENCE_MS / 1000))
     if leading_samples:
-        source_pcm = np.concatenate((np.zeros(leading_samples, dtype=np.int16), source_pcm))
+        source_pcm = np.concatenate(
+            (np.zeros(leading_samples, dtype=np.int16), source_pcm))
         metrics["audio_leading_silence_ms"] = ASR_LEADING_SILENCE_MS
     metrics["audio_pcm_bytes_raw"] = int(source_pcm.nbytes)
     metrics["audio_pcm_prepare_s"] = _round_time(pcm_start)
@@ -727,12 +779,14 @@ def _prepare_webrtc_asr_pcm(audio: tuple[int, np.ndarray]) -> tuple[str, list[st
     temp_paths.append(input_path)
 
     metrics["asr_format"] = "pcm"
-    trailing_samples = max(0, int(ASR_SAMPLE_RATE * ASR_TRAILING_SILENCE_MS / 1000))
+    trailing_samples = max(
+        0, int(ASR_SAMPLE_RATE * ASR_TRAILING_SILENCE_MS / 1000))
     if not shutil.which("ffmpeg"):
         if int(audio[0]) == ASR_SAMPLE_RATE:
             if trailing_samples:
                 with open(input_path, "ab") as input_file:
-                    input_file.write(np.zeros(trailing_samples, dtype=np.int16).tobytes())
+                    input_file.write(
+                        np.zeros(trailing_samples, dtype=np.int16).tobytes())
                 metrics["audio_trailing_silence_ms"] = ASR_TRAILING_SILENCE_MS
             metrics["audio_resample_skipped"] = "ffmpeg_not_found_input_rate_matches"
             metrics["asr_sample_rate"] = ASR_SAMPLE_RATE
@@ -776,7 +830,8 @@ def _prepare_webrtc_asr_pcm(audio: tuple[int, np.ndarray]) -> tuple[str, list[st
         )
         if trailing_samples:
             with open(output_path, "ab") as output_file:
-                output_file.write(np.zeros(trailing_samples, dtype=np.int16).tobytes())
+                output_file.write(
+                    np.zeros(trailing_samples, dtype=np.int16).tobytes())
             metrics["audio_trailing_silence_ms"] = ASR_TRAILING_SILENCE_MS
         metrics["audio_resample_s"] = _round_time(resample_start)
         metrics["audio_pcm_bytes_16k"] = os.path.getsize(output_path)
@@ -916,14 +971,16 @@ class _FastAsrCallback(RecognitionCallback):
         self.complete_event.set()
 
     def on_error(self, result: RecognitionResult) -> None:
-        self.error_message = getattr(result, "message", "") or "ASR callback error"
+        self.error_message = getattr(
+            result, "message", "") or "ASR callback error"
         self.error_event.set()
         self.first_final_event.set()
 
     def prompt(self) -> str:
         with self.lock:
             if self.sentences:
-                ordered = sorted(self.sentences, key=lambda s: s.get("sentence_id") or 0)
+                ordered = sorted(
+                    self.sentences, key=lambda s: s.get("sentence_id") or 0)
                 return _parse_asr_sentences(ordered)
             return self.latest_text.strip()
 
@@ -978,7 +1035,8 @@ def _recognize_audio_callback(
                 break
             rec.send_audio_frame(frame)
 
-    threading.Thread(target=_stop_recognition_async, args=(rec,), daemon=True).start()
+    threading.Thread(target=_stop_recognition_async,
+                     args=(rec,), daemon=True).start()
     if not callback.first_final_event.wait(ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S):
         timings["asr_callback_timeout_s"] = ASR_CALLBACK_FIRST_FINAL_TIMEOUT_S
         prompt = callback.prompt()
@@ -1011,10 +1069,12 @@ def _recognize_audio_fast(
     if not ASR_USE_CALLBACK:
         return _recognize_audio_sync(audio_path, audio_format, sample_rate, asr_options, timings)
     try:
-        prompt, error = _recognize_audio_callback(audio_path, audio_format, sample_rate, asr_options, timings)
+        prompt, error = _recognize_audio_callback(
+            audio_path, audio_format, sample_rate, asr_options, timings)
         if error == ASR_CALLBACK_TIMEOUT_ERROR and ASR_SYNC_FALLBACK:
             timings["asr_callback_fallback_reason"] = error
-            fallback_prompt, fallback_error = _recognize_audio_sync(audio_path, audio_format, sample_rate, asr_options, timings)
+            fallback_prompt, fallback_error = _recognize_audio_sync(
+                audio_path, audio_format, sample_rate, asr_options, timings)
             timings["asr_callback_fallback_used"] = True
             if fallback_error:
                 return "", f"{error}; sync fallback failed: {fallback_error}"
@@ -1049,41 +1109,55 @@ def _friendly_asr_error(message: str) -> str:
 def resolve_runtime_selection(*values):
     s, d, v, a = DEFAULT_STAGE_ID, DEFAULT_DIFFICULTY_ID, DEFAULT_VOICE_ID, DEFAULT_AVATAR_ID
     for val in values:
-        if not isinstance(val, str): continue
-        if val in STAGE_IDS: s = val
-        elif val in DIFFICULTY_IDS: d = val
-        elif val in VOICE_IDS: v = val
-        elif val in AVATAR_IDS: a = val
+        if not isinstance(val, str):
+            continue
+        if val in STAGE_IDS:
+            s = val
+        elif val in DIFFICULTY_IDS:
+            d = val
+        elif val in VOICE_IDS:
+            v = val
+        elif val in AVATAR_IDS:
+            a = val
     return s, d, v, a
+
 
 def run_customer_turn(
     prompt: str, stage_id=DEFAULT_STAGE_ID, difficulty_id=DEFAULT_DIFFICULTY_ID,
     voice_id=DEFAULT_VOICE_ID, avatar_id=DEFAULT_AVATAR_ID, session_id="local",
+    business_line: str | None = None, preferred_case_id: str | None = None,
+    trainer_info: dict | None = None,
 ) -> dict:
     """同步版: ASR 后的 LLM + guardrails + TTS → dict"""
-    s, d, v, a = resolve_runtime_selection(stage_id, difficulty_id, voice_id, avatar_id)
-    training_prompt, training_summary, session_context = _build_session_training_prompt(session_id, s, d)
+    s, d, v, a = resolve_runtime_selection(
+        stage_id, difficulty_id, voice_id, avatar_id)
+    training_prompt, training_summary, session_context = _build_session_training_prompt(
+        session_id, s, d, preferred_case_id=preferred_case_id, business_line=business_line)
     voice_cfg = resolve_voice(v)
-    avatar_cfg = resolve_avatar_for_customer(training_summary.get("customer_id"), a)
-    st = {**training_summary, "voice_id": v, "voice": voice_cfg.get("label",v),
-          "avatar_id": avatar_cfg.get("id",a), "avatar": avatar_cfg.get("label",a),
+    avatar_cfg = resolve_avatar_for_customer(
+        training_summary.get("customer_id"), a)
+    st = {**training_summary, "voice_id": v, "voice": voice_cfg.get("label", v),
+          "avatar_id": avatar_cfg.get("id", a), "avatar": avatar_cfg.get("label", a),
           "session_id": session_id}
+    if trainer_info:
+        st.update({key: value for key, value in trainer_info.items() if value})
     raw_mem = get_recent_memory(session_id, limit=10)
     mem, removed = sanitize_recent_memory(raw_mem)
     mem_prompt = f"【当前会话记忆】\n{mem}" if mem else "【当前会话记忆】\n暂无历史对话。"
     avatar_prompt = f"【客户人物形象】\n形象：{avatar_cfg.get('label',a)}\n角色：{avatar_cfg.get('role','')}\n性格：{avatar_cfg.get('temperament','')}"
     guard_prompt = build_role_guard_prompt(training_summary.get("customer"))
     quality_prompt = build_customer_quality_prompt(mem)
-    set_status("loaded", prompt=prompt, training={**st, "session_id": session_id})
-    resp = Generation.call(model=os.getenv("DASHSCOPE_LLM_MODEL","qwen3.6-plus"),
-        messages=[{"role":"system","content":f"{training_prompt}\n\n{avatar_prompt}\n\n{mem_prompt}\n\n{guard_prompt}\n\n{quality_prompt}"},
-                  {"role":"user","content":prompt}],
-        result_format="message",
-        temperature=0.45,
-        top_p=0.8,
-        repetition_penalty=1.12,
-        seed=random.randint(1, 2147483647),
-    )
+    set_status("loaded", prompt=prompt, training={
+               **st, "session_id": session_id})
+    resp = Generation.call(model=os.getenv("DASHSCOPE_LLM_MODEL", "qwen3.6-plus"),
+                           messages=[{"role": "system", "content": f"{training_prompt}\n\n{avatar_prompt}\n\n{mem_prompt}\n\n{guard_prompt}\n\n{quality_prompt}"},
+                                     {"role": "user", "content": prompt}],
+                           result_format="message",
+                           temperature=0.45,
+                           top_p=0.8,
+                           repetition_penalty=1.12,
+                           seed=random.randint(1, 2147483647),
+                           )
     payload = {}
     next_state = ""
     triggered_events = []
@@ -1092,29 +1166,41 @@ def run_customer_turn(
         raw = resp.output.choices[0].message.content
         payload = parse_customer_payload(raw)
         next_state = str(payload.get("next_state") or "")
-        triggered_events = payload.get("triggered_events") if isinstance(payload.get("triggered_events"), list) else []
-        score_notes = payload.get("score_notes") if isinstance(payload.get("score_notes"), dict) else {}
+        triggered_events = payload.get("triggered_events") if isinstance(
+            payload.get("triggered_events"), list) else []
+        score_notes = payload.get("score_notes") if isinstance(
+            payload.get("score_notes"), dict) else {}
         rt = clean_customer_reply(raw, training_summary.get("customer"))
-        if not rt: rt = raw.strip() or "嗯，您先说说具体想怎么合作？"
+        if not rt:
+            rt = raw.strip() or "嗯，您先说说具体想怎么合作？"
         rt = refine_customer_reply(rt, prompt, mem, st)
-        gr = "role_reversed" if is_role_reversed_sales_reply(rt) else ("hostile" if is_hostile_or_confused_user_text(prompt) else "")
-        if gr: rt = build_customer_guardrail_reply(prompt, st)
-    else: raw = rt = "抱歉，系统开小差了。"; gr = ""
+        gr = "role_reversed" if is_role_reversed_sales_reply(rt) else (
+            "hostile" if is_hostile_or_confused_user_text(prompt) else "")
+        if gr:
+            rt = build_customer_guardrail_reply(prompt, st)
+    else:
+        raw = rt = "抱歉，系统开小差了。"
+        gr = ""
     before_state = training_summary.get("current_state")
-    next_context = advance_session_state(session_id, next_state, triggered_events) if not gr else session_context
+    next_context = advance_session_state(
+        session_id, next_state, triggered_events) if not gr else session_context
     _merge_state_context(st, next_context)
-    set_status("qwen_done", response_text=rt, guardrail=gr or None, training=st)
+    set_status("qwen_done", response_text=rt,
+               guardrail=gr or None, training=st)
     tid, tix = None, None
-    try: tid, tix = save_turn(session_id=session_id, user_text=prompt, assistant_text=rt, training=st,
-        metadata={"stage_id":s,"difficulty_id":d,"voice_id":v,"avatar_id":a,
-                  **_turn_metadata(st, before_state, next_state, triggered_events, score_notes)})
-    except Exception as e: set_status("save_error", error=str(e))
+    try:
+        tid, tix = save_turn(session_id=session_id, user_text=prompt, assistant_text=rt, training=st,
+                             metadata={"stage_id": s, "difficulty_id": d, "voice_id": v, "avatar_id": a,
+                                       **_turn_metadata(st, before_state, next_state, triggered_events, score_notes)})
+    except Exception as e:
+        set_status("save_error", error=str(e))
     else:
         _maybe_evaluate_completed_session(session_id, st)
     ab = synthesize_with_retry(rt, voice_cfg)
-    if tid is not None: update_turn_audio_bytes(tid, len(ab))
-    return {"prompt":prompt,"response_text":rt,"raw_response_text":raw,"guardrail":gr,"training":st,
-            "turn_index":tix,"audio_bytes":ab,"sample_rate":24000,
+    if tid is not None:
+        update_turn_audio_bytes(tid, len(ab))
+    return {"prompt": prompt, "response_text": rt, "raw_response_text": raw, "guardrail": gr, "training": st,
+            "turn_index": tix, "audio_bytes": ab, "sample_rate": 24000,
             "next_state": next_state, "triggered_events": triggered_events, "score_notes": score_notes}
 
 
@@ -1133,10 +1219,14 @@ def response(audio: tuple[int, np.ndarray], *args):
     try:
         overall_start = time.perf_counter()
         timings: dict[str, object] = {}
-        if len(args) >= 3: stage_id, diff_id, voice_id = args[-3], args[-2], args[-1]
-        elif len(args) == 2: stage_id, diff_id, voice_id = args[0], args[1], DEFAULT_VOICE_ID
-        elif len(args) == 1: stage_id, diff_id, voice_id = args[0], DEFAULT_DIFFICULTY_ID, DEFAULT_VOICE_ID
-        else: stage_id, diff_id, voice_id = DEFAULT_STAGE_ID, DEFAULT_DIFFICULTY_ID, DEFAULT_VOICE_ID
+        if len(args) >= 3:
+            stage_id, diff_id, voice_id = args[-3], args[-2], args[-1]
+        elif len(args) == 2:
+            stage_id, diff_id, voice_id = args[0], args[1], DEFAULT_VOICE_ID
+        elif len(args) == 1:
+            stage_id, diff_id, voice_id = args[0], DEFAULT_DIFFICULTY_ID, DEFAULT_VOICE_ID
+        else:
+            stage_id, diff_id, voice_id = DEFAULT_STAGE_ID, DEFAULT_DIFFICULTY_ID, DEFAULT_VOICE_ID
         s, d, v = stage_id or DEFAULT_STAGE_ID, diff_id or DEFAULT_DIFFICULTY_ID, voice_id or DEFAULT_VOICE_ID
         active_selection = get_active_stream_selection()
         s = active_selection.get("stage_id") or s
@@ -1160,12 +1250,14 @@ def response(audio: tuple[int, np.ndarray], *args):
             audio_bytes=0,
             audio_duration_s=audio_duration_s,
             audio_sample_rate=audio[0],
-            training={"stage_id": s, "difficulty_id": d, "voice_id": v, "case_id": active_case_id},
+            training={"stage_id": s, "difficulty_id": d,
+                      "voice_id": v, "case_id": active_case_id},
             timings=timings,
         )
 
         # 1. Encode and normalize audio for ASR.
-        audio_path, temp_paths, audio_metrics = _prepare_webrtc_asr_audio(audio)
+        audio_path, temp_paths, audio_metrics = _prepare_webrtc_asr_audio(
+            audio)
         timings.update(audio_metrics)
         set_status(
             "audio_prepared",
@@ -1173,14 +1265,16 @@ def response(audio: tuple[int, np.ndarray], *args):
             response_text="",
             audio_bytes=0,
             audio_duration_s=audio_duration_s,
-            training={"stage_id": s, "difficulty_id": d, "voice_id": v, "case_id": active_case_id},
+            training={"stage_id": s, "difficulty_id": d,
+                      "voice_id": v, "case_id": active_case_id},
             timings=timings,
         )
 
         # 2. ASR
         asr_start = time.perf_counter()
         audio_format = str(timings.get("asr_format") or ASR_FORMAT)
-        asr_sample_rate = int(timings.get("asr_sample_rate") or ASR_SAMPLE_RATE)
+        asr_sample_rate = int(timings.get(
+            "asr_sample_rate") or ASR_SAMPLE_RATE)
         asr_options = {
             "max_sentence_silence": ASR_MAX_SENTENCE_SILENCE_MS,
             "semantic_punctuation_enabled": ASR_SEMANTIC_PUNCTUATION_ENABLED,
@@ -1195,7 +1289,8 @@ def response(audio: tuple[int, np.ndarray], *args):
             }
         )
         try:
-            prompt, asr_error = _recognize_audio_fast(audio_path, audio_format, asr_sample_rate, asr_options, timings)
+            prompt, asr_error = _recognize_audio_fast(
+                audio_path, audio_format, asr_sample_rate, asr_options, timings)
         finally:
             _cleanup_temp_paths(temp_paths)
         timings["asr_s"] = _round_time(asr_start)
@@ -1233,7 +1328,8 @@ def response(audio: tuple[int, np.ndarray], *args):
             )
             yield (24000, np.frombuffer(ab, dtype=np.int16).reshape(1, -1))
             return
-        set_status("asr_done", prompt=prompt, audio_duration_s=audio_duration_s, timings=timings)
+        set_status("asr_done", prompt=prompt,
+                   audio_duration_s=audio_duration_s, timings=timings)
 
         # 3. LLM (JSONL case session + state machine + guardrails)
         prompt_start = time.perf_counter()
@@ -1247,41 +1343,47 @@ def response(audio: tuple[int, np.ndarray], *args):
             preferred_case_id=active_case_id or None,
         )
         voice_cfg = resolve_voice(v)
-        st = {**training_summary, "voice_id": v, "voice": voice_cfg.get("label",v), "session_id": session_key}
+        st = {**training_summary, "voice_id": v,
+              "voice": voice_cfg.get("label", v), "session_id": session_key}
         raw_mem = get_recent_memory(session_key, limit=10)
         mem, _ = sanitize_recent_memory(raw_mem)
         mem_prompt = f"【会话记忆】\n{mem}" if mem else "【会话记忆】\n暂无历史对话。"
-        guard_prompt = build_role_guard_prompt(training_summary.get("customer"))
+        guard_prompt = build_role_guard_prompt(
+            training_summary.get("customer"))
         quality_prompt = build_customer_quality_prompt(mem)
         timings["prompt_build_s"] = _round_time(prompt_start)
         set_status("loaded", prompt=prompt, training=st, timings=timings)
 
         qwen_start = time.perf_counter()
-        resp = Generation.call(model=os.getenv("DASHSCOPE_LLM_MODEL","qwen3.6-plus"),
-            messages=[{"role":"system","content":f"{training_prompt}\n\n{mem_prompt}\n\n{guard_prompt}\n\n{quality_prompt}"},
-                      {"role":"user","content":prompt}],
-            result_format="message",
-            temperature=0.45,
-            top_p=0.8,
-            repetition_penalty=1.12,
-            seed=random.randint(1, 2147483647),
-        )
+        resp = Generation.call(model=os.getenv("DASHSCOPE_LLM_MODEL", "qwen3.6-plus"),
+                               messages=[{"role": "system", "content": f"{training_prompt}\n\n{mem_prompt}\n\n{guard_prompt}\n\n{quality_prompt}"},
+                                         {"role": "user", "content": prompt}],
+                               result_format="message",
+                               temperature=0.45,
+                               top_p=0.8,
+                               repetition_penalty=1.12,
+                               seed=random.randint(1, 2147483647),
+                               )
         timings["qwen_s"] = _round_time(qwen_start)
 
         if resp.status_code == 200:
             raw = resp.output.choices[0].message.content
             payload = parse_customer_payload(raw)
             next_state = str(payload.get("next_state") or "")
-            triggered_events = payload.get("triggered_events") if isinstance(payload.get("triggered_events"), list) else []
-            score_notes = payload.get("score_notes") if isinstance(payload.get("score_notes"), dict) else {}
+            triggered_events = payload.get("triggered_events") if isinstance(
+                payload.get("triggered_events"), list) else []
+            score_notes = payload.get("score_notes") if isinstance(
+                payload.get("score_notes"), dict) else {}
             rt = clean_customer_reply(raw, training_summary.get("customer"))
-            if not rt: rt = raw.strip() or "嗯，您先说说具体想怎么合作？"
+            if not rt:
+                rt = raw.strip() or "嗯，您先说说具体想怎么合作？"
             rt = refine_customer_reply(rt, prompt, mem, st)
             if is_role_reversed_sales_reply(rt):
                 rt = build_customer_guardrail_reply(prompt, st)
                 next_context = session_context
             else:
-                next_context = advance_session_state(session_key, next_state, triggered_events)
+                next_context = advance_session_state(
+                    session_key, next_state, triggered_events)
         else:
             rt = "抱歉，系统开小差了。"
             raw = rt
@@ -1359,11 +1461,15 @@ stream = Stream(
     ),
     concurrency_limit=5,
     additional_inputs=[
-        gr.Dropdown(choices=stage_choices(), value=DEFAULT_STAGE_ID, label="训练阶段", interactive=True),
-        gr.Dropdown(choices=difficulty_choices(), value=DEFAULT_DIFFICULTY_ID, label="难度等级", interactive=True),
-        gr.Dropdown(choices=voice_choices(), value=DEFAULT_VOICE_ID, label="客户音色", interactive=True),
+        gr.Dropdown(choices=stage_choices(), value=DEFAULT_STAGE_ID,
+                    label="训练阶段", interactive=True),
+        gr.Dropdown(choices=difficulty_choices(),
+                    value=DEFAULT_DIFFICULTY_ID, label="难度等级", interactive=True),
+        gr.Dropdown(choices=voice_choices(), value=DEFAULT_VOICE_ID,
+                    label="客户音色", interactive=True),
     ],
-    ui_args={"title":"国际物流模拟客户陪练","subtitle":"WebRTC · VAD · Guardrails · P0 few-shot","full_screen":False},
+    ui_args={"title": "国际物流模拟客户陪练",
+             "subtitle": "WebRTC · VAD · Guardrails · P0 few-shot", "full_screen": False},
 )
 
 
@@ -1373,7 +1479,11 @@ stream = Stream(
 
 def pcm_to_wav_bytes(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes:
     buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf: wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sample_rate); wf.writeframes(pcm_bytes)
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
     return buf.getvalue()
 
 
@@ -1381,16 +1491,24 @@ def transcribe_uploaded_audio(audio_bytes: bytes, filename: str = "") -> str:
     suffix = Path(filename or "").suffix or ".webm"
     input_path = mp3_path = ""
     try:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f: f.write(audio_bytes); input_path = f.name
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f: mp3_path = f.name
-        subprocess.run(["ffmpeg","-y","-i",input_path,"-vn","-ac","1","-ar","16000","-codec:a","libmp3lame","-b:a","64k",mp3_path], check=True, capture_output=True, text=True)
-        rec = Recognition(model=os.getenv("DASHSCOPE_ASR_MODEL","paraformer-realtime-v2"), format="mp3", sample_rate=16000)
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(audio_bytes)
+            input_path = f.name
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            mp3_path = f.name
+        subprocess.run(["ffmpeg", "-y", "-i", input_path, "-vn", "-ac", "1", "-ar", "16000", "-codec:a",
+                       "libmp3lame", "-b:a", "64k", mp3_path], check=True, capture_output=True, text=True)
+        rec = Recognition(model=os.getenv(
+            "DASHSCOPE_ASR_MODEL", "paraformer-realtime-v2"), format="mp3", sample_rate=16000)
         asr_resp = rec.call(mp3_path)
-        if asr_resp.status_code != 200: return ""
+        if asr_resp.status_code != 200:
+            return ""
         sents = asr_resp.get_sentence()
-        return " ".join(x.get("text","") for x in sents).strip() if isinstance(sents, list) else (sents or {}).get("text","").strip()
+        return " ".join(x.get("text", "") for x in sents).strip() if isinstance(sents, list) else (sents or {}).get("text", "").strip()
     finally:
         for p in (input_path, mp3_path):
             if p:
-                try: os.remove(p)
-                except OSError: pass
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass

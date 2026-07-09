@@ -68,6 +68,12 @@ def init_db() -> None:
                 difficulty_id TEXT,
                 voice_id TEXT,
                 avatar_id TEXT,
+                trainer_user_id TEXT,
+                trainer_external_user_id TEXT,
+                trainer_name TEXT,
+                trainer_department TEXT,
+                trainer_source TEXT,
+                trainer_avatar_url TEXT,
                 case_id TEXT,
                 current_state TEXT,
                 final_state TEXT,
@@ -75,6 +81,7 @@ def init_db() -> None:
                 is_success INTEGER NOT NULL DEFAULT 0,
                 completed_at TEXT,
                 evaluation_json TEXT,
+                case_snapshot_json TEXT,
                 turn_count INTEGER NOT NULL DEFAULT 0,
                 memory_text TEXT NOT NULL DEFAULT ''
             );
@@ -106,17 +113,42 @@ def init_db() -> None:
                 FOREIGN KEY (session_id) REFERENCES conversation_sessions(session_id)
             );
 
+            CREATE TABLE IF NOT EXISTS training_users (
+                user_id TEXT PRIMARY KEY,
+                source TEXT NOT NULL DEFAULT 'local',
+                external_user_id TEXT,
+                display_name TEXT,
+                department TEXT,
+                avatar_url TEXT,
+                mobile TEXT,
+                email TEXT,
+                role TEXT,
+                raw_profile_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_seen_at TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_conversation_turns_session
                 ON conversation_turns(session_id, turn_index);
 
             CREATE INDEX IF NOT EXISTS idx_conversation_memory_session
                 ON conversation_memory(session_id, turn_index);
+
+            CREATE INDEX IF NOT EXISTS idx_training_users_source_external
+                ON training_users(source, external_user_id);
             """
         )
         _ensure_columns(
             conn,
             "conversation_sessions",
             {
+                "trainer_user_id": "TEXT",
+                "trainer_external_user_id": "TEXT",
+                "trainer_name": "TEXT",
+                "trainer_department": "TEXT",
+                "trainer_source": "TEXT",
+                "trainer_avatar_url": "TEXT",
                 "case_id": "TEXT",
                 "current_state": "TEXT",
                 "final_state": "TEXT",
@@ -124,6 +156,25 @@ def init_db() -> None:
                 "is_success": "INTEGER NOT NULL DEFAULT 0",
                 "completed_at": "TEXT",
                 "evaluation_json": "TEXT",
+                "case_snapshot_json": "TEXT",
+            },
+        )
+        _ensure_columns(
+            conn,
+            "training_users",
+            {
+                "source": "TEXT NOT NULL DEFAULT 'local'",
+                "external_user_id": "TEXT",
+                "display_name": "TEXT",
+                "department": "TEXT",
+                "avatar_url": "TEXT",
+                "mobile": "TEXT",
+                "email": "TEXT",
+                "role": "TEXT",
+                "raw_profile_json": "TEXT",
+                "created_at": "TEXT",
+                "updated_at": "TEXT",
+                "last_seen_at": "TEXT",
             },
         )
 
@@ -161,10 +212,156 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             data["evaluation"] = {}
     data.pop("evaluation_json", None)
+    if data.get("case_snapshot_json"):
+        try:
+            data["case_snapshot"] = json.loads(data["case_snapshot_json"])
+        except json.JSONDecodeError:
+            data["case_snapshot"] = {}
+    data.pop("case_snapshot_json", None)
     return data
 
 
 # ── CRUD 操作 ───────────────────────────────────────────
+
+def _text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, set)):
+        value = " / ".join(str(item) for item in value if item is not None)
+    value = str(value).strip()
+    return value or None
+
+
+def _first(source: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = _text(source.get(key))
+        if value:
+            return value
+    return None
+
+
+def _profile_json(user: dict[str, Any]) -> str | None:
+    raw = user.get("raw_profile")
+    if raw is None:
+        raw = user.get("profile")
+    if raw is None:
+        return _text(user.get("raw_profile_json"))
+    if isinstance(raw, str):
+        return raw
+    try:
+        return json.dumps(raw, ensure_ascii=False)
+    except TypeError:
+        return json.dumps(str(raw), ensure_ascii=False)
+
+
+def _trainer_snapshot(training: dict[str, Any]) -> dict[str, str | None]:
+    trainer = training.get("trainer")
+    trainer_data = trainer if isinstance(trainer, dict) else {}
+    merged = {**trainer_data, **training}
+    return {
+        "trainer_user_id": _first(
+            merged, "trainer_user_id", "training_user_id", "user_id", "userid", "employee_id"
+        ),
+        "trainer_external_user_id": _first(
+            merged, "trainer_external_user_id", "external_user_id", "wecom_userid", "wecom_user_id", "userid"
+        ),
+        "trainer_name": _first(
+            merged, "trainer_name", "display_name", "user_name", "name", "sales_name", "employee_name"
+        ),
+        "trainer_department": _first(
+            merged, "trainer_department", "department", "department_name", "dept", "dept_name"
+        ),
+        "trainer_source": _first(merged, "trainer_source", "source", "identity_source"),
+        "trainer_avatar_url": _first(merged, "trainer_avatar_url", "avatar_url", "avatar", "headimgurl"),
+    }
+
+
+def upsert_training_user(user: dict[str, Any]) -> dict[str, Any]:
+    """Create or update a training user identity record."""
+    init_db()
+    source = _first(user, "source", "identity_source") or "local"
+    external_user_id = _first(user, "external_user_id",
+                              "wecom_userid", "wecom_user_id", "userid")
+    user_id = _first(user, "user_id", "training_user_id", "employee_id")
+    if not user_id and external_user_id:
+        user_id = f"{source}:{external_user_id}"
+    if not user_id:
+        raise ValueError("training user requires user_id or external_user_id")
+
+    now = utc_now()
+    payload = {
+        "user_id": user_id,
+        "source": source,
+        "external_user_id": external_user_id,
+        "display_name": _first(user, "display_name", "trainer_name", "user_name", "name", "sales_name"),
+        "department": _first(user, "department", "department_name", "dept", "dept_name"),
+        "avatar_url": _first(user, "avatar_url", "trainer_avatar_url", "avatar", "headimgurl"),
+        "mobile": _first(user, "mobile", "phone", "telephone"),
+        "email": _first(user, "email", "mail"),
+        "role": _first(user, "role", "position", "title"),
+        "raw_profile_json": _profile_json(user),
+        "last_seen_at": _first(user, "last_seen_at") or now,
+    }
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO training_users (
+                user_id, source, external_user_id, display_name, department,
+                avatar_url, mobile, email, role, raw_profile_json,
+                created_at, updated_at, last_seen_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                source=COALESCE(excluded.source, training_users.source),
+                external_user_id=COALESCE(excluded.external_user_id, training_users.external_user_id),
+                display_name=COALESCE(excluded.display_name, training_users.display_name),
+                department=COALESCE(excluded.department, training_users.department),
+                avatar_url=COALESCE(excluded.avatar_url, training_users.avatar_url),
+                mobile=COALESCE(excluded.mobile, training_users.mobile),
+                email=COALESCE(excluded.email, training_users.email),
+                role=COALESCE(excluded.role, training_users.role),
+                raw_profile_json=COALESCE(excluded.raw_profile_json, training_users.raw_profile_json),
+                updated_at=excluded.updated_at,
+                last_seen_at=COALESCE(excluded.last_seen_at, training_users.last_seen_at)
+            """,
+            (
+                payload["user_id"],
+                payload["source"],
+                payload["external_user_id"],
+                payload["display_name"],
+                payload["department"],
+                payload["avatar_url"],
+                payload["mobile"],
+                payload["email"],
+                payload["role"],
+                payload["raw_profile_json"],
+                now,
+                now,
+                payload["last_seen_at"],
+            ),
+        )
+    return get_training_user(user_id) or {"user_id": user_id}
+
+
+def get_training_user(user_id: str) -> dict[str, Any] | None:
+    """Fetch a training user identity record by internal user_id."""
+    init_db()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM training_users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    data = _row_to_dict(row)
+    if not data:
+        return None
+    if data.get("raw_profile_json"):
+        try:
+            data["raw_profile"] = json.loads(data["raw_profile_json"])
+        except json.JSONDecodeError:
+            data["raw_profile"] = data["raw_profile_json"]
+    data.pop("raw_profile_json", None)
+    return data
+
 
 def ensure_session(session_id: str, training: dict[str, Any]) -> None:
     """创建或更新会话记录（UPSERT）。
@@ -175,15 +372,18 @@ def ensure_session(session_id: str, training: dict[str, Any]) -> None:
     now = utc_now()
     is_complete = int(bool(training.get("training_complete")))
     completed_at = now if is_complete else training.get("completed_at")
+    trainer = _trainer_snapshot(training)
     with connect() as conn:
         conn.execute(
             """
             INSERT INTO conversation_sessions (
                 session_id, created_at, updated_at,
                 stage_id, customer_id, difficulty_id, voice_id, avatar_id,
+                trainer_user_id, trainer_external_user_id, trainer_name,
+                trainer_department, trainer_source, trainer_avatar_url,
                 case_id, current_state, final_state, is_complete, is_success, completed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 updated_at=excluded.updated_at,
                 stage_id=excluded.stage_id,
@@ -191,6 +391,12 @@ def ensure_session(session_id: str, training: dict[str, Any]) -> None:
                 difficulty_id=excluded.difficulty_id,
                 voice_id=excluded.voice_id,
                 avatar_id=excluded.avatar_id,
+                trainer_user_id=COALESCE(excluded.trainer_user_id, conversation_sessions.trainer_user_id),
+                trainer_external_user_id=COALESCE(excluded.trainer_external_user_id, conversation_sessions.trainer_external_user_id),
+                trainer_name=COALESCE(excluded.trainer_name, conversation_sessions.trainer_name),
+                trainer_department=COALESCE(excluded.trainer_department, conversation_sessions.trainer_department),
+                trainer_source=COALESCE(excluded.trainer_source, conversation_sessions.trainer_source),
+                trainer_avatar_url=COALESCE(excluded.trainer_avatar_url, conversation_sessions.trainer_avatar_url),
                 case_id=excluded.case_id,
                 current_state=excluded.current_state,
                 final_state=excluded.final_state,
@@ -207,6 +413,12 @@ def ensure_session(session_id: str, training: dict[str, Any]) -> None:
                 training.get("difficulty_id"),
                 training.get("voice_id"),
                 training.get("avatar_id"),
+                trainer["trainer_user_id"],
+                trainer["trainer_external_user_id"],
+                trainer["trainer_name"],
+                trainer["trainer_department"],
+                trainer["trainer_source"],
+                trainer["trainer_avatar_url"],
                 training.get("case_id"),
                 training.get("current_state"),
                 training.get("final_state"),
@@ -389,6 +601,62 @@ def save_session_evaluation(session_id: str, evaluation: dict[str, Any]) -> None
             WHERE session_id = ?
             """,
             (now, json.dumps(evaluation, ensure_ascii=False), session_id),
+        )
+
+
+def save_session_snapshot(session_id: str, snapshot: dict[str, Any]) -> None:
+    """保存会话训练快照（在训练开始时调用，冻结选中的 case、标签、配置）。"""
+    init_db()
+    now = utc_now()
+    selected_config = snapshot.get("selected_config") if isinstance(snapshot.get("selected_config"), dict) else {}
+    training_summary = snapshot.get("training_summary") if isinstance(snapshot.get("training_summary"), dict) else {}
+    merged = {**selected_config, **training_summary, **snapshot}
+    trainer = _trainer_snapshot(merged)
+    snapshot_json = json.dumps(snapshot, ensure_ascii=False)
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO conversation_sessions (
+                session_id, created_at, updated_at,
+                stage_id, difficulty_id, voice_id, avatar_id,
+                trainer_user_id, trainer_external_user_id, trainer_name,
+                trainer_department, trainer_source, trainer_avatar_url,
+                case_id, case_snapshot_json, memory_text
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                updated_at=excluded.updated_at,
+                stage_id=COALESCE(excluded.stage_id, conversation_sessions.stage_id),
+                difficulty_id=COALESCE(excluded.difficulty_id, conversation_sessions.difficulty_id),
+                voice_id=COALESCE(excluded.voice_id, conversation_sessions.voice_id),
+                avatar_id=COALESCE(excluded.avatar_id, conversation_sessions.avatar_id),
+                trainer_user_id=COALESCE(excluded.trainer_user_id, conversation_sessions.trainer_user_id),
+                trainer_external_user_id=COALESCE(excluded.trainer_external_user_id, conversation_sessions.trainer_external_user_id),
+                trainer_name=COALESCE(excluded.trainer_name, conversation_sessions.trainer_name),
+                trainer_department=COALESCE(excluded.trainer_department, conversation_sessions.trainer_department),
+                trainer_source=COALESCE(excluded.trainer_source, conversation_sessions.trainer_source),
+                trainer_avatar_url=COALESCE(excluded.trainer_avatar_url, conversation_sessions.trainer_avatar_url),
+                case_id=COALESCE(excluded.case_id, conversation_sessions.case_id),
+                case_snapshot_json=excluded.case_snapshot_json
+            """,
+            (
+                session_id,
+                now,
+                now,
+                _first(merged, "stage_id"),
+                _first(merged, "difficulty_id", "diff_id"),
+                _first(merged, "voice_id"),
+                _first(merged, "avatar_id"),
+                trainer["trainer_user_id"],
+                trainer["trainer_external_user_id"],
+                trainer["trainer_name"],
+                trainer["trainer_department"],
+                trainer["trainer_source"],
+                trainer["trainer_avatar_url"],
+                _first(merged, "case_id", "base_case_id"),
+                snapshot_json,
+                "",
+            ),
         )
 
 
